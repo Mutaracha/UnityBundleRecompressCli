@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<ApplicationIcon>logo.ico</ApplicationIcon>
+		<TargetFramework>net10.0</TargetFramework>
+		<RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+	<ItemGroup>
+		<Reference Include="AssetsTools.NET">
+			<HintPath>libs\AssetsTools.NET.dll</HintPath>
+		</Reference>
+	</ItemGroup>
+</Project>
