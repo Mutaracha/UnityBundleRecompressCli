@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading.Tasks;
 using AssetsTools.NET;
@@ -28,9 +29,9 @@ internal static class AppConfig
 	public const int ExitSameInputOutput = 4;
 	public const int ExitException = 10;
 	
-	public const string RequiredRuntime = ".NET 10.0";
-	public const string RuntimeDownloadUrl = "https://dotnet.microsoft.com/download/dotnet/10.0";
-	public const string WingetCommand = "winget install Microsoft.DotNet.DesktopRuntime.10";
+	public const string RequiredRuntime = ".NET Framework 4.8";
+	public const string RuntimeDownloadUrl = "https://dotnet.microsoft.com/download/dotnet-framework/net48";
+	public const string WingetCommand = "winget install Microsoft.DotNet.Framework.DeveloperPack_4";
 }
 
 #endregion
@@ -306,8 +307,9 @@ internal sealed class LibraryUpdateService : IDisposable
 
 	private static readonly string[] TargetFrameworks =
 	{
-		"net10.0", "net9.0", "net8.0", "net7.0", "net6.0",
-		"netstandard2.1", "netstandard2.0"
+		// AssetsTools.NET currently publishes its compatible assembly for
+		// netstandard2.0 (and may also include legacy framework targets).
+		"netstandard2.0", "net48", "net40", "net35"
 	};
 
 	private readonly HttpClient _httpClient;
@@ -332,6 +334,25 @@ internal sealed class LibraryUpdateService : IDisposable
 	}
 
 	public async Task<LibraryVersionInfo> CheckAndUpdateAsync(bool forceCheck = false)
+	{
+		// Batch processing starts several CLI instances in parallel. Serialize
+		// update/check operations so they cannot replace the DLL simultaneously.
+		using var updateMutex = new Mutex(false, @"Local\BundleRecompressCli.AssetsToolsUpdate");
+		bool entered = updateMutex.WaitOne(TimeSpan.FromMinutes(5));
+		if (!entered)
+			throw new TimeoutException("Не удалось получить блокировку обновления AssetsTools.NET");
+
+		try
+		{
+			return await CheckAndUpdateCoreAsync(forceCheck);
+		}
+		finally
+		{
+			updateMutex.ReleaseMutex();
+		}
+	}
+
+	private async Task<LibraryVersionInfo> CheckAndUpdateCoreAsync(bool forceCheck)
 	{
 		CleanupBackup();
 
@@ -558,18 +579,6 @@ internal sealed class LibraryUpdateService : IDisposable
 		if (string.IsNullOrEmpty(state.InstalledDllHash))
 			return true;
 
-		// Версия в NuGet изменилась по сравнению с тем, что мы видели раньше
-		var previousState = LoadState();
-		if (!string.IsNullOrEmpty(state.LastKnownVersion) &&
-			!string.IsNullOrEmpty(previousState.LastKnownVersion) &&
-			!string.Equals(state.LastKnownVersion, previousState.LastKnownVersion,
-				StringComparison.OrdinalIgnoreCase))
-		{
-			ConsoleOutput.WriteDebug(
-				$"Новая версия в NuGet: {previousState.LastKnownVersion} → {state.LastKnownVersion}");
-			return true;
-		}
-
 		// Локальный файл изменён вручную
 		if (!string.Equals(localHash, state.InstalledDllHash, StringComparison.OrdinalIgnoreCase))
 		{
@@ -743,25 +752,20 @@ internal static class AppStartup
 		ConsoleOutput.WriteLine("Библиотека обновлена. Выполняется перезапуск...");
 		ConsoleOutput.WriteLine();
 
-		string exePath = Environment.ProcessPath
-			?? Path.Combine(AppContext.BaseDirectory, 
+		string exePath = Process.GetCurrentProcess().MainModule?.FileName
+			?? Path.Combine(AppContext.BaseDirectory,
 				AppDomain.CurrentDomain.FriendlyName + ".exe");
 
-		var startInfo = new System.Diagnostics.ProcessStartInfo
+		var startInfo = new ProcessStartInfo
 		{
 			FileName = exePath,
 			UseShellExecute = false,
-			CreateNoWindow = false
+			CreateNoWindow = false,
+			Arguments = string.Join(" ", originalArgs.Select(QuoteWindowsArgument))
 		};
 
-		// Передаём исходные аргументы
-		foreach (var arg in originalArgs)
-		{
-			startInfo.ArgumentList.Add(arg);
-		}
-
 		// Устанавливаем переменную окружения для защиты от зацикливания
-		startInfo.Environment[RestartEnvVar] = "1";
+		startInfo.EnvironmentVariables[RestartEnvVar] = "1";
 
 		try
 		{
@@ -779,6 +783,42 @@ internal static class AppStartup
 		}
 
 		return AppConfig.ExitException;
+	}
+
+	private static string QuoteWindowsArgument(string argument)
+	{
+		if (argument.Length == 0)
+			return "\"\"";
+
+		if (!argument.Any(char.IsWhiteSpace) && !argument.Contains('\"'))
+			return argument;
+
+		// CommandLineToArgvW-compatible quoting for paths and other arguments.
+		var builder = new System.Text.StringBuilder("\"");
+		int backslashes = 0;
+		foreach (char c in argument)
+		{
+			if (c == '\\')
+			{
+				backslashes++;
+				continue;
+			}
+
+			if (c == '\"')
+			{
+				builder.Append('\\', backslashes * 2 + 1);
+				builder.Append('\"');
+			}
+			else
+			{
+				builder.Append('\\', backslashes);
+				builder.Append(c);
+			}
+			backslashes = 0;
+		}
+		builder.Append('\\', backslashes * 2);
+		builder.Append('\"');
+		return builder.ToString();
 	}
 
 	private static bool IsRestarted()
@@ -818,13 +858,11 @@ internal sealed class UpdateCommand : ICommand
 				ConsoleOutput.WriteLine("Библиотека уже актуальна.");
 			}
 
-			ConsoleOutput.WaitForAnyKey();
 			return AppConfig.ExitSuccess;
 		}
 		catch (Exception ex)
 		{
 			ConsoleOutput.WriteError(ex.Message);
-			ConsoleOutput.WaitForAnyKey();
 			return AppConfig.ExitException;
 		}
 	}
@@ -1408,7 +1446,6 @@ internal sealed class HelpCommand : ICommand
 		}
 
 		ConsoleOutput.PrintHelp();
-		ConsoleOutput.WaitForAnyKey();
 
 		return _hasError ? AppConfig.ExitInvalidArgs : AppConfig.ExitSuccess;
 	}
@@ -1431,7 +1468,6 @@ internal sealed class InfoCommand : ICommand
 			if (!File.Exists(_filePath))
 			{
 				ConsoleOutput.WriteError($"Файл не найден: {_filePath}");
-				ConsoleOutput.WaitForAnyKey();
 				return AppConfig.ExitFileNotFound;
 			}
 
@@ -1444,7 +1480,6 @@ internal sealed class InfoCommand : ICommand
 			ConsoleOutput.WriteInfo("MD5", info.Md5Hash);
 			ConsoleOutput.WriteInfo("Метод сжатия", CompressionHelper.GetDisplayName(info.CompressionType));
 
-			ConsoleOutput.WaitForAnyKey();
 			return AppConfig.ExitSuccess;
 		}
 		catch (Exception ex)
@@ -1468,7 +1503,6 @@ internal sealed class InfoCommand : ICommand
 
 		if (waitForKey)
 		{
-			ConsoleOutput.WaitForAnyKey();
 		}
 
 		return AppConfig.ExitException;
@@ -1595,7 +1629,6 @@ internal static class Program
 			case StartupResult.Failed:
 				ConsoleOutput.WriteError(
 					"Невозможно продолжить без библиотеки AssetsTools.NET");
-				ConsoleOutput.WaitForAnyKey();
 				return AppConfig.ExitException;
 
 			case StartupResult.Continue:
@@ -1618,12 +1651,10 @@ internal static class Program
 			if (result.Updated)
 			{
 				ConsoleOutput.WriteLine("Обновление завершено.");
-				ConsoleOutput.WaitForAnyKey();
 			}
 			else
 			{
 				ConsoleOutput.WriteLine("Библиотека уже актуальна.");
-				ConsoleOutput.WaitForAnyKey();
 			}
 
 			return AppConfig.ExitSuccess;
@@ -1631,7 +1662,6 @@ internal static class Program
 		catch (Exception ex)
 		{
 			ConsoleOutput.WriteError(ex.Message);
-			ConsoleOutput.WaitForAnyKey();
 			return AppConfig.ExitException;
 		}
 	}
