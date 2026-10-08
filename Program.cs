@@ -790,7 +790,7 @@ internal static class AppStartup
 		if (argument.Length == 0)
 			return "\"\"";
 
-		if (!argument.Any(char.IsWhiteSpace) && !argument.Contains('\"'))
+		if (!argument.Any(char.IsWhiteSpace) && argument.IndexOf('\"') < 0)
 			return argument;
 
 		// CommandLineToArgvW-compatible quoting for paths and other arguments.
@@ -1596,46 +1596,21 @@ internal static class CommandFactory
 
 internal static class Program
 {
-	private static async Task<int> Main(string[] args)
+	private static int Main(string[] args)
 	{
 		var options = ArgumentParser.Parse(args);
 
 		ConsoleOutput.DebugMode = options.DebugMode;
 
-		// Для Help не нужна проверка библиотеки
-		if (options.Mode == OperationMode.Help)
-		{
-			return CommandFactory.Create(options).Execute();
-		}
-
-		// Для Update — особая обработка
-		if (options.Mode == OperationMode.Update)
-		{
-			return await HandleUpdateMode(args);
-		}
-
-		// Проверяем/обновляем библиотеку перед основной работой
-		var startupResult = await AppStartup.EnsureLibraryAsync(
-			options.ForceUpdate,
-			options.SkipUpdate);
-
-		switch (startupResult)
-		{
-			case StartupResult.NeedRestart:
-				return AppStartup.RestartWithSameArgs(args);
-
-			case StartupResult.Failed:
-				ConsoleOutput.WriteError(
-					"Невозможно продолжить без библиотеки AssetsTools.NET");
-				return AppConfig.ExitException;
-
-			case StartupResult.Continue:
-			default:
-				break;
-		}
-
 		var command = CommandFactory.Create(options);
-		return command.Execute();
+		int result = command.Execute();
+
+		// Direct double-click (no arguments) is intentionally interactive. The
+		// external bootstrap has already ensured AssetsTools.NET is available.
+		if (args.Length == 0)
+			ConsoleOutput.WaitForAnyKey();
+
+		return result;
 	}
 
 	private static async Task<int> HandleUpdateMode(string[] args)

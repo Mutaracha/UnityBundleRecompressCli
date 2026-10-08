@@ -19,10 +19,15 @@ jobs:
           dotnet-version: '8.x'
 
       - name: Restore
-        run: dotnet restore BundleRecompressCli.csproj
+        run: |
+          dotnet restore BundleRecompressCli.csproj
+          dotnet restore Bootstrap/Bootstrap.csproj
 
-      - name: Build
+      - name: Build worker
         run: dotnet build BundleRecompressCli.csproj --configuration Release --no-restore
+
+      - name: Build bootstrap
+        run: dotnet build Bootstrap/Bootstrap.csproj --configuration Release --no-restore
 
       - name: Verify pinned AssetsTools.NET binary
         shell: pwsh
@@ -31,22 +36,22 @@ jobs:
           if (-not (Test-Path $dll)) {
             throw "AssetsTools.NET.dll was not copied to the build output: $dll"
           }
-          $expected = '6b03d589163623b67620fbbc6f425dcb47f856584bd3ab1a34c896b2666372e4'
+          $expected = '8d3cf02a877b0fa0363c7aa5aede18b8c1023519632f5e7eac19ad084c743b34'
           $actual = (Get-FileHash -Algorithm SHA256 $dll).Hash.ToLowerInvariant()
           if ($actual -ne $expected) {
             throw "Pinned AssetsTools.NET.dll hash mismatch. Expected $expected, got $actual"
           }
 
-      - name: Smoke test help
+      - name: Smoke test worker help
         shell: pwsh
         run: |
-          $exe = Join-Path $env:GITHUB_WORKSPACE 'bin/Release/net48/BundleRecompressCli.exe'
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'bin/Release/net48/BundleRecompressCli.Worker.exe'
           if (-not (Test-Path $exe)) {
-            throw "Executable was not produced: $exe"
+            throw "Worker executable was not produced: $exe"
           }
           & $exe --help
           if ($LASTEXITCODE -ne 0) {
-            throw "Help command failed with exit code $LASTEXITCODE"
+            throw "Worker help command failed with exit code $LASTEXITCODE"
           }
 
       - name: Package artifact
@@ -54,9 +59,9 @@ jobs:
         run: |
           $output = Join-Path $env:GITHUB_WORKSPACE 'artifact'
           New-Item -ItemType Directory -Force -Path $output | Out-Null
-          Copy-Item 'bin/Release/net48/BundleRecompressCli.exe' $output
+          Copy-Item 'Bootstrap/bin/Release/net48/BundleRecompressCli.exe' $output
+          Copy-Item 'bin/Release/net48/BundleRecompressCli.Worker.exe' $output
           Copy-Item 'bin/Release/net48/AssetsTools.NET.dll' $output
-          Copy-Item 'logo.ico' $output
           Compress-Archive -Path "$output/*" -DestinationPath 'BundleRecompressCli-win-x64.zip' -Force
 
       - name: Upload artifact

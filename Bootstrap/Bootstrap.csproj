@@ -1,23 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <AssemblyName>BundleRecompressCli.Worker</AssemblyName>
+    <AssemblyName>BundleRecompressCli</AssemblyName>
     <TargetFramework>net48</TargetFramework>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <ApplicationIcon>logo.ico</ApplicationIcon>
+    <ApplicationIcon>..\logo.ico</ApplicationIcon>
   </PropertyGroup>
-
-  <!-- This is the exact package version recorded by the updater state for
-       the currently tested DLL. The SHA-256 is verified in CI. -->
   <ItemGroup>
     <Reference Include="System.Net.Http" />
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
-    <PackageReference Include="AssetsTools.NET" Version="3.0.5" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 </Project>
