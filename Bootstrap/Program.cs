@@ -20,7 +20,17 @@ internal static class Program
         try
         {
             bool force = args.Any(a => a.Equals("--update", StringComparison.OrdinalIgnoreCase));
-            EnsureLibrary(baseDir, force).GetAwaiter().GetResult();
+            bool helpOnly = args.Length == 0 ||
+                            args[0].Equals("-h", StringComparison.OrdinalIgnoreCase) ||
+                            args[0].Equals("--help", StringComparison.OrdinalIgnoreCase) ||
+                            args[0].Equals("/?", StringComparison.OrdinalIgnoreCase);
+            string dllPath = Path.Combine(baseDir, DllName);
+
+            // Help does not need an update check when the worker dependency is
+            // already present. On a clean installation it is still downloaded
+            // so the worker can be started safely.
+            if (!helpOnly || !File.Exists(dllPath))
+                EnsureLibrary(baseDir, force).GetAwaiter().GetResult();
 
             if (force)
                 return 0;
