@@ -10,13 +10,17 @@
     <ApplicationIcon>logo.ico</ApplicationIcon>
   </PropertyGroup>
 
-  <!-- The checked-in DLL is AssemblyVersion 3.0.0. Keep this package version
-       fixed for reproducible builds; runtime updates remain supported. -->
+  <!-- Keep the exact currently tested AssetsTools.NET binary for builds.
+       Runtime update checks remain supported. The NuGet package version which
+       produced this binary has not yet been identified reliably. -->
   <ItemGroup>
+    <Reference Include="AssetsTools.NET">
+      <HintPath>libs\AssetsTools.NET.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <Reference Include="System.Net.Http" />
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
-    <PackageReference Include="AssetsTools.NET" Version="3.0.0" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 </Project>

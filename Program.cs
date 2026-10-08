@@ -269,7 +269,7 @@ internal static class ArgumentParser
 		HelpArgs.Contains(arg);
 
 	private static bool IsFlag(string arg) =>
-		arg.StartsWith('-') || arg.StartsWith('/');
+		arg.StartsWith("-", StringComparison.Ordinal) || arg.StartsWith("/", StringComparison.Ordinal);
 }
 
 #endregion
@@ -894,7 +894,6 @@ internal static class CompressionHelper
 		{
 			AssetBundleCompressionType.LZMA => "LZMA",
 			AssetBundleCompressionType.LZ4 => "LZ4",
-			AssetBundleCompressionType.LZ4Fast => "LZ4Fast",
 			AssetBundleCompressionType.None => "None",
 			_ => compType.ToString()
 		};
@@ -904,7 +903,6 @@ internal static class CompressionHelper
 		{
 			AssetBundleCompressionType.LZMA => "SKIPPED_ALREADY_LZMA",
 			AssetBundleCompressionType.LZ4 => "SKIPPED_ALREADY_LZ4",
-			AssetBundleCompressionType.LZ4Fast => "SKIPPED_ALREADY_LZ4",
 			_ => "SKIPPED_ALREADY_COMPRESSED"
 		};
 
