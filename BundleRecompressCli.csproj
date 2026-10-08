@@ -13,6 +13,9 @@
   <!-- The checked-in DLL is AssemblyVersion 3.0.0. Keep this package version
        fixed for reproducible builds; runtime updates remain supported. -->
   <ItemGroup>
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
     <PackageReference Include="AssetsTools.NET" Version="3.0.0" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
