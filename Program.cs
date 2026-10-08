@@ -19,6 +19,13 @@ namespace BundleRecompressCli;
 internal static class AppConfig
 {
 	public const long MemoryThresholdBytes = 500L * 1024L * 1024L; // 500 MB
+
+	// Безопасный лимит распакованных данных для режима памяти.
+	// MemoryStream не может превышать int.MaxValue (~2 GB) и бросает
+	// IOException "Stream was too long."; дополнительно нужно место на
+	// заголовок bundle и удвоение ёмкости при росте буфера.
+	public const long MemoryModeMaxDecompressedBytes = 1536L * 1024L * 1024L; // 1.5 GB
+
 	public const string TempFileSuffix = ".tmp.decomp";
 	public const int ProgressWriteThresholdPercent = 2;
 	
@@ -1091,7 +1098,7 @@ internal static class ConsoleOutput
 		Console.WriteLine("  " + FormatHelpLine("-i", "Показать информацию о bundle-файле"));
 		Console.WriteLine("  " + FormatHelpLine("-c <mode>", "Метод сжатия: lzma, lz4, lz4fast"));
 		Console.WriteLine("  " + FormatHelpLine("-p <file>", "Путь к progress-файлу для внешнего отслеживания"));
-		Console.WriteLine("  " + FormatHelpLine("-m", "Принудительно распаковывать в память"));
+		Console.WriteLine("  " + FormatHelpLine("-m", "Принудительно распаковывать в память (автоматически отключается при объёме данных более 1.5 GB)"));
 		Console.WriteLine("  " + FormatHelpLine("-f", "Принудительно распаковывать во временный файл"));
 		Console.WriteLine("  " + FormatHelpLine("--update", "Принудительно проверить обновления библиотеки AssetsTools.NET"));
 		Console.WriteLine("  " + FormatHelpLine("--no-update", "Пропустить проверку обновлений"));
@@ -1291,6 +1298,22 @@ internal sealed class BundleService : IDisposable
 		bool needsUnpack = originalCompression != AssetBundleCompressionType.None;
 		bool useMemoryMode = DetermineMemoryMode(inputInfo.Length, forceMemory, forceTemp);
 
+		// Распакованный размер может превышать лимит MemoryStream (~2 GB)
+		// даже при небольшом сжатом файле (например, LZMA с сжатием 4x+).
+		// В этом случае принудительно переходим на временный файл.
+		if (needsUnpack && useMemoryMode)
+		{
+			long decompressedSize = GetTotalDecompressedSize(bundleInst.file);
+			if (decompressedSize > AppConfig.MemoryModeMaxDecompressedBytes)
+			{
+				useMemoryMode = false;
+				ConsoleOutput.WriteWarning(string.Format(
+					"Распакованный объём данных ({0} MB) превышает безопасный лимит режима памяти ({1} MB). Используется временный файл.",
+					decompressedSize / (1024 * 1024),
+					AppConfig.MemoryModeMaxDecompressedBytes / (1024 * 1024)));
+			}
+		}
+
 		// Вывод информации
 		PrintProcessingInfo(inputInfo, outputFull, targetCompression, 
 			originalCompression, needsUnpack, useMemoryMode);
@@ -1384,6 +1407,22 @@ internal sealed class BundleService : IDisposable
 		if (forceMemory) return true;
 		if (forceTemp) return false;
 		return fileSize < AppConfig.MemoryThresholdBytes;
+	}
+
+	private static long GetTotalDecompressedSize(AssetBundleFile bundle)
+	{
+		// Суммарный размер данных после распаковки всех блоков.
+		// Именно этот объём будет записан в целевой поток при Unpack.
+		long total = 0;
+		var blockInfos = bundle.BlockAndDirInfo?.BlockInfos;
+		if (blockInfos == null) return total;
+
+		foreach (var blockInfo in blockInfos)
+		{
+			total += blockInfo.DecompressedSize;
+		}
+
+		return total;
 	}
 
 	private static void PrintProcessingInfo(
