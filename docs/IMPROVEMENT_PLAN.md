@@ -178,3 +178,59 @@ bin\
 3. **Место шаблона поставки в репозитории:** `release/` (рекомендуется) или другое имя?
 4. **7za.exe:** класть вручную в `release/bin/` или скачивать в CI? Сейчас CI его не трогает.
 5. **Ручная проверка на Windows:** после реализации нужен прогон на машине с PowerShell 7 и .NET Framework 4.8 (в песочнице этого нет). Подтвердите, что это возможно.
+
+---
+
+## 8. Решения по итогам обсуждения
+
+- Worker `BundleRecompressCli.Worker.exe` обязателен (K1).
+- Стандарт: .NET Framework 4.8, зависимостей окружения нет.
+- Источник библиотеки: NuGet. Пин 3.0.5 нужен для сборки, у пользователя Bootstrap обновляет до последней стабильной версии (K6 закрыт этим решением).
+- 7za.exe кладётся вручную в `release/bin/`.
+- Справка по двойному щелчку на `BundleRecompressCli.exe` возвращена: Bootstrap запускает Worker с `--help` и ждёт клавишу.
+
+## 9. Статус реализации
+
+**Сделано**
+
+| Пункт | Что сделано |
+|---|---|
+| K1, K2, раздел 3 | Шаблон поставки в `release/` (`Unity bundle recompress launcher.cmd`, `bin/batch_lzma_cli_pwsh.ps1`). `scripts/package.ps1` собирает zip со структурой `bin\` и включает Worker, Bootstrap, `AssetsTools.NET.dll`, `System.Text.Json.dll` и зависимости, 7za при наличии. |
+| K11, Q17 | `.gitignore`: `/bin/` и `/obj/` только в корне, а не `bin/` везде. Добавлены `log/`, `backup/`, `temp/`, `*.new`, `*.tmp.decomp` и др. |
+| K3 | Bootstrap: сбой проверки или загрузки при уже установленной DLL — предупреждение, работа продолжается. Состояние сохраняется. |
+| K4 | Bootstrap разбирает `--update` и `--no-update`. Флаги вырезаются, Worker их не получает. `--update` без аргументов завершается после обновления, с аргументами продолжает работу. |
+| K5 | `ps1` вызывает `BundleRecompressCli.exe --update` один раз до запуска потоков. Каждый файл запускается с `--no-update`. |
+| Дубликат updater | Из Worker удалены `LibraryUpdateService`, `AppStartup`, `UpdateCommand`, `HandleUpdateMode` и опции `--update`/`--no-update`. Единственный updater — Bootstrap. |
+| Справка | Двойной клик по `BundleRecompressCli.exe` → `--help` у Worker → пауза. Двойной клик по Worker — тоже справка и пауза. |
+| K7 | Если оригинал перенесён в backup, а замена не удалась, он возвращается на место. Иначе сообщается путь к backup. |
+| K8 | Если в backup уже есть файл с тем же путём, файл не обрабатывается (FAIL с пояснением). Оригинал не перезаписывается. |
+| K9 | `backup/`, `temp/` исключены из поиска файлов. Временные `.new` получают уникальные имена (GUID). |
+| K10 | Очистка удаляет только `*.bundle.new`, `*.unity3d.new` и их `.tmp.decomp`. |
+| Q4 | Progress-строки `\r` не пишутся, если stdout перенаправлен (лог PowerShell). |
+| Q7 | Проверка места: запас ×2. |
+| Q8 | Перед заменой проверяется сигнатура `UnityFS` выходного файла. |
+| Q9 | Пункт меню «архив backup» показывается только при наличии `7za.exe`. |
+| Q10 | При исключении в job имя файла сохраняется в отчёте. |
+| Q11 | Ввод пути: кавычки и пробелы обрезаются. |
+| Q12 | `.cmd` пробрасывает код возврата; пауза только при ошибке запуска. |
+| Q13 | Preflight проверяет `BundleRecompressCli.exe` и `BundleRecompressCli.Worker.exe`, а также `AssetsTools.NET.dll` после подготовки. |
+| CI | Проверка синтаксиса `ps1`, сборка пакета через `scripts/package.ps1`, smoke-тест `--no-update --help` из собранного пакета. |
+
+**Осталось / отложено**
+
+- Q5 (коды выхода Worker), Q14 (явная кодировка консоли), Q15 (единая версия), Q6 (ограничение потоков по RAM) — не делалось.
+- Q16 (Ctrl+C): дочерние процессы CLI не останавливаются принудительно. Требует отдельной доработки.
+- Q3 (lock-файл с SHA-256): не делалось, решено полагаться на NuGet и HTTPS.
+- Не проверено на Windows: сборка C# (`dotnet build`), синтаксис PowerShell (`ps1` проверен только сбалансированность скобок, PowerShell 7 в песочнице недоступен — GitHub Releases заблокированы), поведение `Move-Item`/блокировок, двойной клик, кодировка вывода.
+
+## 10. Как проверить на Windows
+
+```powershell
+dotnet restore BundleRecompressCli.csproj; dotnet restore Bootstrap/Bootstrap.csproj
+dotnet build BundleRecompressCli.csproj -c Release --no-restore
+dotnet build Bootstrap/Bootstrap.csproj -c Release --no-restore
+pwsh scripts/package.ps1 -WorkerOutDir bin/Release/net48 -BootstrapOutDir Bootstrap/bin/Release/net48 `
+  -TemplateDir release -StagingDir artifact/staging -ZipPath BundleRecompressCli-win-x64.zip
+```
+
+Затем в распакованном архиве: двойной клик по `BundleRecompressCli.exe` (ожидается справка и пауза), запуск `launcher.cmd` на тестовой папке с 2–3 bundle, проверка backup и лога, сценарий без сети (`--update` при установленной DLL должен дать предупреждение и код 0).

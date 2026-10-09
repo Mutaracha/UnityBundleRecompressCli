@@ -1,6 +1,20 @@
-bin/
-obj/
+# Сборочные каталоги проектов (только корневые/Bootstrap, не release/bin)
+/bin/
+/obj/
+/Bootstrap/bin/
+/Bootstrap/obj/
 publish/
 .vs/
 *.user
 *.suo
+
+# Артефакты запуска утилиты и пакетирования
+log/
+backup/
+temp/
+artifact/
+*.zip
+*.new
+*.tmp.decomp
+recent_source_dirs.txt
+.assetstools_update_state.json

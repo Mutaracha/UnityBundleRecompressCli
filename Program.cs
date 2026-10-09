@@ -50,8 +50,7 @@ internal enum OperationMode
 {
 	Help,
 	Info,
-	Recompress,
-	Update
+	Recompress
 }
 
 /// Результат парсинга аргументов командной строки
@@ -64,8 +63,6 @@ internal sealed class CommandLineOptions
 	public string? ProgressFilePath { get; init; }
 	public bool ForceMemory { get; init; }
 	public bool ForceTemp { get; init; }
-	public bool ForceUpdate { get; init; }
-	public bool SkipUpdate { get; init; }
 	public bool DebugMode { get; init; }
 	public string? ErrorMessage { get; init; }
 	public bool HasError => !string.IsNullOrEmpty(ErrorMessage);
@@ -114,16 +111,6 @@ internal static class ArgumentParser
 			return new CommandLineOptions { Mode = OperationMode.Help };
 		}
 
-		// Только --update
-		if (args.Length == 1 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase))
-		{
-			return new CommandLineOptions 
-			{ 
-				Mode = OperationMode.Update,
-				ForceUpdate = true 
-			};
-		}
-
 		// Drag & drop одного файла → режим информации
 		if (args.Length == 1 && !IsFlag(args[0]))
 		{
@@ -142,8 +129,6 @@ internal static class ArgumentParser
 		bool infoMode = false;
 		bool forceMemory = false;
 		bool forceTemp = false;
-		bool forceUpdate = false;
-		bool skipUpdate = false;
 		bool debugMode = false;
 		string? progressFilePath = null;
 		string? compressionModeText = null;
@@ -165,14 +150,6 @@ internal static class ArgumentParser
 
 				case "-f":
 					forceTemp = true;
-					break;
-
-				case "--update":
-					forceUpdate = true;
-					break;
-
-				case "--no-update":
-					skipUpdate = true;
 					break;
 
 				case "--debug":
@@ -216,11 +193,6 @@ internal static class ArgumentParser
 			return Error("Параметры -m и -f нельзя использовать одновременно");
 		}
 
-		if (forceUpdate && skipUpdate)
-		{
-			return Error("Параметры --update и --no-update нельзя использовать одновременно");
-		}
-
 		if (infoMode)
 		{
 			if (positional.Count < 1)
@@ -232,8 +204,6 @@ internal static class ArgumentParser
 			{
 				Mode = OperationMode.Info,
 				InputPath = positional[0],
-				ForceUpdate = forceUpdate,
-				SkipUpdate = skipUpdate,
 				DebugMode = debugMode
 			};
 		}
@@ -263,8 +233,6 @@ internal static class ArgumentParser
 			ProgressFilePath = progressFilePath,
 			ForceMemory = forceMemory,
 			ForceTemp = forceTemp,
-			ForceUpdate = forceUpdate,
-			SkipUpdate = skipUpdate,
 			DebugMode = debugMode
 		};
 	}
@@ -277,602 +245,6 @@ internal static class ArgumentParser
 
 	private static bool IsFlag(string arg) =>
 		arg.StartsWith("-", StringComparison.Ordinal) || arg.StartsWith("/", StringComparison.Ordinal);
-}
-
-#endregion
-
-#region Library Update Models
-
-internal sealed class UpdateCheckState
-{
-	public DateTime LastCheckUtc { get; set; }
-	public string? LastKnownVersion { get; set; }
-	public string? InstalledDllHash { get; set; }
-}
-
-internal sealed record LibraryVersionInfo(
-	string? LocalDllHash,
-	string? RemoteVersion,
-	bool Updated,
-	bool CheckPerformed
-);
-
-#endregion
-
-#region Library Update Service
-
-internal sealed class LibraryUpdateService : IDisposable
-{
-	private const string DllName = "AssetsTools.NET.dll";
-	private const string StateFileName = ".assetstools_update_state.json";
-	private const int CheckIntervalDays = 1;
-
-	private const string NuGetIndexUrl =
-		"https://api.nuget.org/v3-flatcontainer/assetstools.net/index.json";
-	private const string NuGetDownloadUrlTemplate =
-		"https://api.nuget.org/v3-flatcontainer/assetstools.net/{0}/assetstools.net.{0}.nupkg";
-
-	private static readonly string[] TargetFrameworks =
-	{
-		// AssetsTools.NET currently publishes its compatible assembly for
-		// netstandard2.0 (and may also include legacy framework targets).
-		"netstandard2.0", "net48", "net40", "net35"
-	};
-
-	private readonly HttpClient _httpClient;
-	private readonly string _appDirectory;
-	private readonly string _stateFilePath;
-	private readonly string _dllPath;
-	private readonly string _backupPath;
-	private bool _disposed;
-
-	public LibraryUpdateService()
-	{
-		_httpClient = new HttpClient
-		{
-			Timeout = TimeSpan.FromSeconds(30)
-		};
-		_httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("BundleRecompressCli/1.0");
-
-		_appDirectory = AppContext.BaseDirectory;
-		_stateFilePath = Path.Combine(_appDirectory, StateFileName);
-		_dllPath = Path.Combine(_appDirectory, DllName);
-		_backupPath = _dllPath + ".bak";
-	}
-
-	public async Task<LibraryVersionInfo> CheckAndUpdateAsync(bool forceCheck = false)
-	{
-		// Batch processing starts several CLI instances in parallel. Serialize
-		// update/check operations so they cannot replace the DLL simultaneously.
-		using var updateMutex = new Mutex(false, @"Local\BundleRecompressCli.AssetsToolsUpdate");
-		bool entered = updateMutex.WaitOne(TimeSpan.FromMinutes(5));
-		if (!entered)
-			throw new TimeoutException("Не удалось получить блокировку обновления AssetsTools.NET");
-
-		try
-		{
-			return await CheckAndUpdateCoreAsync(forceCheck);
-		}
-		finally
-		{
-			updateMutex.ReleaseMutex();
-		}
-	}
-
-	private async Task<LibraryVersionInfo> CheckAndUpdateCoreAsync(bool forceCheck)
-	{
-		CleanupBackup();
-
-		var state = LoadState();
-		string? localHash = GetLocalDllHash();
-
-		bool shouldCheck = forceCheck || ShouldPerformCheck(state);
-
-		if (!shouldCheck && localHash != null)
-		{
-			ConsoleOutput.WriteDebug(
-				$"Проверка обновлений пропущена (последняя: {state.LastCheckUtc:yyyy-MM-dd HH:mm})");
-			return new LibraryVersionInfo(localHash, state.LastKnownVersion, false, false);
-		}
-
-		ConsoleOutput.WriteLine("Проверка обновлений AssetsTools.NET...");
-
-		string? latestVersion;
-		try
-		{
-			latestVersion = await GetLatestNuGetVersionAsync();
-		}
-		catch (Exception ex)
-		{
-			ConsoleOutput.WriteWarning($"Не удалось проверить обновления: {ex.Message}");
-			return new LibraryVersionInfo(localHash, null, false, false);
-		}
-
-		if (string.IsNullOrEmpty(latestVersion))
-		{
-			ConsoleOutput.WriteWarning("Не удалось определить последнюю версию");
-			return new LibraryVersionInfo(localHash, null, false, false);
-		}
-
-		ConsoleOutput.WriteDebug($"Последняя версия NuGet: {latestVersion}");
-		ConsoleOutput.WriteDebug($"Локальный хеш: {localHash ?? "отсутствует"}");
-		ConsoleOutput.WriteDebug($"Сохранённый хеш: {state.InstalledDllHash ?? "отсутствует"}");
-
-		// Обновляем время проверки
-		state.LastCheckUtc = DateTime.UtcNow;
-		state.LastKnownVersion = latestVersion;
-
-		bool needsDownload = NeedsDownload(localHash, state);
-
-		if (!needsDownload)
-		{
-			SaveState(state);
-			ConsoleOutput.WriteLine($"AssetsTools.NET {latestVersion} — актуальная версия");
-			return new LibraryVersionInfo(localHash, latestVersion, false, true);
-		}
-
-		ConsoleOutput.WriteLine(
-			$"Загрузка AssetsTools.NET {latestVersion}...");
-
-		try
-		{
-			bool replaced = await DownloadAndInstallAsync(latestVersion, localHash, state);
-			SaveState(state);
-
-			if (replaced)
-			{
-				ConsoleOutput.WriteLine($"Библиотека обновлена до версии {latestVersion}");
-				return new LibraryVersionInfo(state.InstalledDllHash, latestVersion, true, true);
-			}
-			else
-			{
-				ConsoleOutput.WriteLine("Скачанная версия идентична установленной. Обновление не требуется.");
-				return new LibraryVersionInfo(localHash, latestVersion, false, true);
-			}
-		}
-		catch (Exception ex)
-		{
-			ConsoleOutput.WriteError($"Ошибка обновления: {ex.Message}");
-
-			if (localHash == null)
-			{
-				throw new InvalidOperationException(
-					$"Не удалось загрузить библиотеку {DllName}: {ex.Message}", ex);
-			}
-
-			SaveState(state);
-			return new LibraryVersionInfo(localHash, latestVersion, false, true);
-		}
-	}
-
-	public bool IsLibraryPresent() => File.Exists(_dllPath);
-
-	public string? GetLocalDllHash()
-	{
-		if (!File.Exists(_dllPath))
-			return null;
-
-		return CalculateFileHash(_dllPath);
-	}
-
-	/// <summary>
-	/// Получает последнюю стабильную версию из NuGet
-	/// </summary>
-	private async Task<string?> GetLatestNuGetVersionAsync()
-	{
-		var response = await _httpClient.GetStringAsync(NuGetIndexUrl);
-
-		using var doc = JsonDocument.Parse(response);
-		var versions = doc.RootElement
-			.GetProperty("versions")
-			.EnumerateArray()
-			.Select(v => v.GetString())
-			.Where(v => !string.IsNullOrEmpty(v))
-			.ToList();
-
-		if (versions.Count == 0)
-			return null;
-
-		// Последняя стабильная версия (без -preview, -beta и т.д.)
-		var stableVersions = versions
-			.Where(v => !v!.Contains('-'))
-			.ToList();
-
-		return stableVersions.LastOrDefault() ?? versions.Last();
-	}
-
-	private async Task<bool> DownloadAndInstallAsync(
-		string version,
-		string? currentHash,
-		UpdateCheckState state)
-	{
-		string downloadUrl = string.Format(NuGetDownloadUrlTemplate, version.ToLowerInvariant());
-
-		ConsoleOutput.WriteDebug($"Загрузка: {downloadUrl}");
-
-		var packageBytes = await _httpClient.GetByteArrayAsync(downloadUrl);
-
-		using var packageStream = new MemoryStream(packageBytes);
-		using var archive = new ZipArchive(packageStream, ZipArchiveMode.Read);
-
-		var dllEntry = FindBestDllEntry(archive);
-
-		if (dllEntry == null)
-		{
-			throw new InvalidOperationException(
-				$"Не найден файл {DllName} в пакете NuGet");
-		}
-
-		string tempPath = _dllPath + ".tmp";
-
-		try
-		{
-			using (var entryStream = dllEntry.Open())
-			using (var fileStream = File.Create(tempPath))
-			{
-				await entryStream.CopyToAsync(fileStream);
-			}
-
-			string newHash = CalculateFileHash(tempPath);
-			ConsoleOutput.WriteDebug($"Хеш текущей:   {currentHash ?? "отсутствует"}");
-			ConsoleOutput.WriteDebug($"Хеш скачанной: {newHash}");
-
-			if (string.Equals(currentHash, newHash, StringComparison.OrdinalIgnoreCase))
-			{
-				File.Delete(tempPath);
-				state.InstalledDllHash = newHash;
-				return false;
-			}
-
-			if (File.Exists(_dllPath))
-			{
-				CleanupBackup();
-				File.Move(_dllPath, _backupPath);
-			}
-
-			File.Move(tempPath, _dllPath);
-			CleanupBackup();
-
-			state.InstalledDllHash = newHash;
-			return true;
-		}
-		catch
-		{
-			RestoreFromBackup();
-
-			if (File.Exists(tempPath))
-				File.Delete(tempPath);
-
-			throw;
-		}
-	}
-
-	private ZipArchiveEntry? FindBestDllEntry(ZipArchive archive)
-	{
-		string currentTfm = GetCurrentTargetFramework();
-		ConsoleOutput.WriteDebug($"Текущий TFM: {currentTfm}");
-
-		foreach (var tfm in TargetFrameworks)
-		{
-			string entryPath = $"lib/{tfm}/{DllName}";
-			var entry = archive.GetEntry(entryPath);
-
-			if (entry != null)
-			{
-				ConsoleOutput.WriteDebug($"Найдена библиотека: {entryPath}");
-				return entry;
-			}
-		}
-
-		var fallback = archive.Entries.FirstOrDefault(e =>
-			e.Name.Equals(DllName, StringComparison.OrdinalIgnoreCase) &&
-			e.FullName.StartsWith("lib/", StringComparison.OrdinalIgnoreCase));
-
-		if (fallback != null)
-		{
-			ConsoleOutput.WriteDebug($"Fallback библиотека: {fallback.FullName}");
-		}
-
-		return fallback;
-	}
-
-	private bool NeedsDownload(string? localHash, UpdateCheckState state)
-	{
-		// Библиотека отсутствует
-		if (localHash == null)
-			return true;
-
-		// Хеш не записан — первый запуск, нужна проверка
-		if (string.IsNullOrEmpty(state.InstalledDllHash))
-			return true;
-
-		// Локальный файл изменён вручную
-		if (!string.Equals(localHash, state.InstalledDllHash, StringComparison.OrdinalIgnoreCase))
-		{
-			ConsoleOutput.WriteDebug("Локальный хеш отличается от сохранённого");
-			return true;
-		}
-
-		return false;
-	}
-
-	private bool ShouldPerformCheck(UpdateCheckState state)
-	{
-		if (state.LastCheckUtc == default)
-			return true;
-
-		var elapsed = DateTime.UtcNow - state.LastCheckUtc;
-		return elapsed.TotalDays >= CheckIntervalDays;
-	}
-
-	private void CleanupBackup()
-	{
-		try
-		{
-			if (File.Exists(_backupPath))
-			{
-				File.Delete(_backupPath);
-				ConsoleOutput.WriteDebug("Удалён бэкап библиотеки");
-			}
-		}
-		catch (Exception ex)
-		{
-			ConsoleOutput.WriteDebug($"Не удалось удалить бэкап: {ex.Message}");
-		}
-	}
-
-	private void RestoreFromBackup()
-	{
-		try
-		{
-			if (File.Exists(_backupPath) && !File.Exists(_dllPath))
-			{
-				File.Move(_backupPath, _dllPath);
-				ConsoleOutput.WriteDebug("Библиотека восстановлена из бэкапа");
-			}
-		}
-		catch (Exception ex)
-		{
-			ConsoleOutput.WriteDebug($"Не удалось восстановить из бэкапа: {ex.Message}");
-		}
-	}
-
-	private static string CalculateFileHash(string path)
-	{
-		using var fs = File.OpenRead(path);
-		using var sha256 = SHA256.Create();
-		byte[] hash = sha256.ComputeHash(fs);
-		return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
-	}
-
-	private static string GetCurrentTargetFramework()
-	{
-		var version = Environment.Version;
-		return $"net{version.Major}.{version.Minor}";
-	}
-
-	private UpdateCheckState LoadState()
-	{
-		try
-		{
-			if (File.Exists(_stateFilePath))
-			{
-				var json = File.ReadAllText(_stateFilePath);
-				return JsonSerializer.Deserialize<UpdateCheckState>(json)
-					?? new UpdateCheckState();
-			}
-		}
-		catch { }
-
-		return new UpdateCheckState();
-	}
-
-	private void SaveState(UpdateCheckState state)
-	{
-		try
-		{
-			var json = JsonSerializer.Serialize(state, new JsonSerializerOptions
-			{
-				WriteIndented = true
-			});
-			File.WriteAllText(_stateFilePath, json);
-		}
-		catch { }
-	}
-
-	public void Dispose()
-	{
-		if (_disposed) return;
-		_disposed = true;
-		_httpClient.Dispose();
-	}
-}
-
-#endregion
-
-#region Application Startup
-
-/// Инициализация приложения с поддержкой перезапуска
-internal static class AppStartup
-{
-	private const string RestartEnvVar = "BUNDLERECOMPRESS_RESTARTED";
-
-	/// Проверяет библиотеку и возвращает true если нужен перезапуск
-	public static async Task<StartupResult> EnsureLibraryAsync(bool forceCheck, bool skipCheck)
-	{
-		if (skipCheck)
-		{
-			ConsoleOutput.WriteDebug("Проверка обновлений пропущена по запросу пользователя");
-			return StartupResult.Continue;
-		}
-
-		// Защита от бесконечного перезапуска
-		if (IsRestarted())
-		{
-			ConsoleOutput.WriteDebug("Запуск после обновления — пропуск повторной проверки");
-			return StartupResult.Continue;
-		}
-
-		using var updateService = new LibraryUpdateService();
-
-		// Если библиотека отсутствует — обязательно загружаем
-		if (!updateService.IsLibraryPresent())
-		{
-			ConsoleOutput.WriteLine("Библиотека AssetsTools.NET не найдена. Загрузка...");
-			try
-			{
-				var result = await updateService.CheckAndUpdateAsync(forceCheck: true);
-				if (result.Updated)
-				{
-					return StartupResult.NeedRestart;
-				}
-				return StartupResult.Continue;
-			}
-			catch (Exception ex)
-			{
-				ConsoleOutput.WriteError($"Не удалось загрузить библиотеку: {ex.Message}");
-				return StartupResult.Failed;
-			}
-		}
-
-		// Библиотека есть — проверяем обновления
-		try
-		{
-			var result = await updateService.CheckAndUpdateAsync(forceCheck);
-			if (result.Updated)
-			{
-				return StartupResult.NeedRestart;
-			}
-		}
-		catch (Exception ex)
-		{
-			ConsoleOutput.WriteWarning($"Ошибка проверки обновлений: {ex.Message}");
-		}
-
-		return StartupResult.Continue;
-	}
-
-	/// Перезапускает утилиту с теми же аргументами
-	public static int RestartWithSameArgs(string[] originalArgs)
-	{
-		ConsoleOutput.WriteLine();
-		ConsoleOutput.WriteLine("Библиотека обновлена. Выполняется перезапуск...");
-		ConsoleOutput.WriteLine();
-
-		string exePath = Process.GetCurrentProcess().MainModule?.FileName
-			?? Path.Combine(AppContext.BaseDirectory,
-				AppDomain.CurrentDomain.FriendlyName + ".exe");
-
-		var startInfo = new ProcessStartInfo
-		{
-			FileName = exePath,
-			UseShellExecute = false,
-			CreateNoWindow = false,
-			Arguments = string.Join(" ", originalArgs.Select(QuoteWindowsArgument))
-		};
-
-		// Устанавливаем переменную окружения для защиты от зацикливания
-		startInfo.EnvironmentVariables[RestartEnvVar] = "1";
-
-		try
-		{
-			using var process = System.Diagnostics.Process.Start(startInfo);
-			if (process != null)
-			{
-				process.WaitForExit();
-				return process.ExitCode;
-			}
-		}
-		catch (Exception ex)
-		{
-			ConsoleOutput.WriteError($"Не удалось перезапустить: {ex.Message}");
-			ConsoleOutput.WriteLine("Пожалуйста, запустите утилиту повторно вручную.");
-		}
-
-		return AppConfig.ExitException;
-	}
-
-	private static string QuoteWindowsArgument(string argument)
-	{
-		if (argument.Length == 0)
-			return "\"\"";
-
-		if (!argument.Any(char.IsWhiteSpace) && argument.IndexOf('\"') < 0)
-			return argument;
-
-		// CommandLineToArgvW-compatible quoting for paths and other arguments.
-		var builder = new System.Text.StringBuilder("\"");
-		int backslashes = 0;
-		foreach (char c in argument)
-		{
-			if (c == '\\')
-			{
-				backslashes++;
-				continue;
-			}
-
-			if (c == '\"')
-			{
-				builder.Append('\\', backslashes * 2 + 1);
-				builder.Append('\"');
-			}
-			else
-			{
-				builder.Append('\\', backslashes);
-				builder.Append(c);
-			}
-			backslashes = 0;
-		}
-		builder.Append('\\', backslashes * 2);
-		builder.Append('\"');
-		return builder.ToString();
-	}
-
-	private static bool IsRestarted()
-	{
-		return Environment.GetEnvironmentVariable(RestartEnvVar) == "1";
-	}
-}
-
-/// Результат инициализации
-internal enum StartupResult
-{
-	Continue,
-	NeedRestart,
-	Failed
-}
-
-#endregion
-
-#region Update Command
-
-/// Команда принудительного обновления библиотеки
-internal sealed class UpdateCommand : ICommand
-{
-	public int Execute()
-	{
-		try
-		{
-			using var updateService = new LibraryUpdateService();
-			var result = updateService.CheckAndUpdateAsync(forceCheck: true).GetAwaiter().GetResult();
-
-			if (result.Updated)
-			{
-				ConsoleOutput.WriteLine("Обновление завершено успешно.");
-			}
-			else
-			{
-				ConsoleOutput.WriteLine("Библиотека уже актуальна.");
-			}
-
-			return AppConfig.ExitSuccess;
-		}
-		catch (Exception ex)
-		{
-			ConsoleOutput.WriteError(ex.Message);
-			return AppConfig.ExitException;
-		}
-	}
 }
 
 #endregion
@@ -1100,8 +472,6 @@ internal static class ConsoleOutput
 		Console.WriteLine("  " + FormatHelpLine("-p <file>", "Путь к progress-файлу для внешнего отслеживания"));
 		Console.WriteLine("  " + FormatHelpLine("-m", "Принудительно распаковывать в память (автоматически отключается при объёме данных более 1.5 GB)"));
 		Console.WriteLine("  " + FormatHelpLine("-f", "Принудительно распаковывать во временный файл"));
-		Console.WriteLine("  " + FormatHelpLine("--update", "Принудительно проверить обновления библиотеки AssetsTools.NET"));
-		Console.WriteLine("  " + FormatHelpLine("--no-update", "Пропустить проверку обновлений"));
 		Console.WriteLine("  " + FormatHelpLine("--debug", "Включить отладочный вывод процесса обновления"));
 		Console.WriteLine("  " + FormatHelpLine("-h, --help, /?", "Показать эту справку"));
 		Console.WriteLine();
@@ -1115,8 +485,7 @@ internal static class ConsoleOutput
 		Console.WriteLine("  - Если bundle сжат другим методом, он обработается с предварительной распаковкой");
 		Console.WriteLine("  - Для файлов меньше 500 МБ по умолчанию для распаковки используется память");
 		Console.WriteLine("  - Для файлов 500 МБ и больше используется временный файл");
-		Console.WriteLine("  - Перед началом работы проверяется наличие библиотеки и ее обновления,");
-		Console.WriteLine("	скачивается новая версия");
+		Console.WriteLine("  - Обновление AssetsTools.NET выполняет BundleRecompressCli.exe (Bootstrap)");
 		Console.WriteLine();
 		Console.WriteLine("Примеры:");
 		Console.WriteLine(@"  BundleRecompressCli ""D:\in\test.bundle""");
@@ -1126,7 +495,6 @@ internal static class ConsoleOutput
 		Console.WriteLine(@"  BundleRecompressCli ""D:\in\big.bundle"" ""D:\out\big.bundle"" -c lzma -p ""D:\temp\big.progress""");
 		Console.WriteLine(@"  BundleRecompressCli ""D:\in\test.bundle"" ""D:\out\test.bundle"" -c lzma -m");
 		Console.WriteLine(@"  BundleRecompressCli ""D:\in\test.bundle"" ""D:\out\test.bundle"" -c lzma -f");
-		Console.WriteLine(@"  BundleRecompressCli --update");
 		PrintRuntimeInfo();
 	}
 }
@@ -1208,7 +576,7 @@ internal sealed class ConsoleCompressProgress : IAssetBundleCompressProgress
 				_lastWrittenPercent = percent;
 			}
 		}
-		else
+		else if (!Console.IsOutputRedirected)
 		{
 			Console.Write($"\rПрогресс: {percent}%   ");
 		}
@@ -1623,7 +991,6 @@ internal static class CommandFactory
 			OperationMode.Help => new HelpCommand(),
 			OperationMode.Info => new InfoCommand(options.InputPath!),
 			OperationMode.Recompress => new RecompressCommand(options),
-			OperationMode.Update => new UpdateCommand(),
 			_ => new HelpCommand("Неизвестный режим работы")
 		};
 	}
@@ -1644,39 +1011,14 @@ internal static class Program
 		var command = CommandFactory.Create(options);
 		int result = command.Execute();
 
-		// Direct double-click (no arguments) is intentionally interactive. The
-		// external bootstrap has already ensured AssetsTools.NET is available.
+		// Прямой запуск без аргументов (двойной клик) интерактивный: справка и пауза.
+		// AssetsTools.NET подготавливает Bootstrap до запуска этого процесса.
 		if (args.Length == 0)
 			ConsoleOutput.WaitForAnyKey();
 
 		return result;
 	}
 
-	private static async Task<int> HandleUpdateMode(string[] args)
-	{
-		using var updateService = new LibraryUpdateService();
-
-		try
-		{
-			var result = await updateService.CheckAndUpdateAsync(forceCheck: true);
-
-			if (result.Updated)
-			{
-				ConsoleOutput.WriteLine("Обновление завершено.");
-			}
-			else
-			{
-				ConsoleOutput.WriteLine("Библиотека уже актуальна.");
-			}
-
-			return AppConfig.ExitSuccess;
-		}
-		catch (Exception ex)
-		{
-			ConsoleOutput.WriteError(ex.Message);
-			return AppConfig.ExitException;
-		}
-	}
 }
 
 #endregion

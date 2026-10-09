@@ -8,6 +8,8 @@ $ScriptVersion = "2.1.3"
 $ScriptDir	= Split-Path -Parent $MyInvocation.MyCommand.Path
 $RootDir	  = Split-Path -Parent $ScriptDir
 $CliPath	  = Join-Path $ScriptDir "BundleRecompressCli.exe"
+$WorkerPath = Join-Path $ScriptDir "BundleRecompressCli.Worker.exe"
+$LibraryPath = Join-Path $ScriptDir "AssetsTools.NET.dll"
 $SevenZipPath = Join-Path $ScriptDir "7za.exe"
 $LogsDir	  = Join-Path $RootDir "log"
 $RecentFile   = Join-Path $ScriptDir "recent_source_dirs.txt"
@@ -101,7 +103,8 @@ function Get-ExitMenuParts {
 	param(
 		[string]$SourceDir,
 		[string]$LogPath,
-		[string]$BackupDir
+		[string]$BackupDir,
+		[string]$SevenZipPath
 	)
 	$menuParts = @("Enter - выйти")
 	if (-not [string]::IsNullOrWhiteSpace($SourceDir) -and (Test-Path $SourceDir)) {
@@ -110,7 +113,7 @@ function Get-ExitMenuParts {
 	if (-not [string]::IsNullOrWhiteSpace($LogPath) -and (Test-Path $LogPath)) {
 		$menuParts += "[2] открыть лог"
 	}
-	if (-not [string]::IsNullOrWhiteSpace($BackupDir) -and (Test-Path $BackupDir)) {
+	if (-not [string]::IsNullOrWhiteSpace($BackupDir) -and (Test-Path $BackupDir) -and (Test-Path $SevenZipPath)) {
 		$menuParts += "[3] упаковать backup в архив"
 	}
 	return $menuParts
@@ -188,7 +191,7 @@ function Pause-OnExit {
 	}
 
 	while ($true) {
-		$menuParts = Get-ExitMenuParts -SourceDir $SourceDir -LogPath $LogPath -BackupDir $BackupDir
+		$menuParts = Get-ExitMenuParts -SourceDir $SourceDir -LogPath $LogPath -BackupDir $BackupDir -SevenZipPath $SevenZipPath
 		$prompt	= "Нажмите " + ($menuParts -join ", ")
 		Rewrite-MenuLine -Text $prompt
 		$keyInfo = [Console]::ReadKey($true)
@@ -207,7 +210,7 @@ function Pause-OnExit {
 			Start-Process $LogPath
 			continue
 		}
-		if ((Test-KeyMatch -KeyName $keyName -Digit "3") -and (Test-Path $BackupDir)) {
+		if ((Test-KeyMatch -KeyName $keyName -Digit "3") -and (Test-Path $BackupDir) -and (Test-Path $SevenZipPath)) {
 			Rewrite-MenuLine
 			[Console]::SetCursorPosition(0, $menuTop)
 			[void](Compress-BackupArchive -BackupDir $BackupDir -EndTime $EndTime `
@@ -310,7 +313,7 @@ function Select-SourceDir {
 			}
 			Write-Host ""
 		}
-		$inputValue = Read-Host "Путь или номер"
+		$inputValue = ([string](Read-Host "Путь или номер")).Trim().Trim('"').Trim()
 		if ([string]::IsNullOrWhiteSpace($inputValue)) {
 			return (Resolve-Path $RootDir).Path
 		}
@@ -348,6 +351,12 @@ function Get-ProcessableFiles {
 	$files  = @()
 	$files += Get-ChildItem @params -Filter *.bundle
 	$files += Get-ChildItem @params -Filter data.unity3d
+	# backup/temp внутри выбранной папки не обрабатываем: иначе повторный запуск
+	# возьмёт сохранённые оригиналы из backup
+	$rootLen = $SourceDir.TrimEnd('\', '/').Length
+	$files = @($files | Where-Object {
+		$_.FullName.Substring($rootLen) -notmatch '^[\\/](backup|temp)[\\/]'
+	})
 	return @($files | Sort-Object FullName -Unique)
 }
 
@@ -485,140 +494,142 @@ $jobScript = {
 		$CompressionModeDisplay
 	)
 
-	$fileSize   = (Get-Item $filePath).Length
+	$fileSize   = (Get-Item -LiteralPath $filePath).Length
 	$useTempDir = ($fileSize -ge $MemoryThresholdBytes)
+	# Уникальное имя временного файла: одинаковые имена из разных подпапок не конфликтуют
+	$uniq       = [guid]::NewGuid().ToString("N")
 
 	$localNewFile = Join-Path (Split-Path $filePath -Parent) ($fileName + ".new")
-	$tempNewFile  = Join-Path $TempDir ($fileName + ".new")
-	$newFile	  = if ($useTempDir) { $tempNewFile } else { $localNewFile }
+	$tempNewFile  = Join-Path $TempDir ($uniq + "_" + $fileName + ".new")
+	$newFile      = if ($useTempDir) { $tempNewFile } else { $localNewFile }
+	$backupFile   = Join-Path $BackupDir $relativePath
+	$state        = @{ BackupMoved = $false }
+
+	function New-JobResult {
+		param(
+			[string]$Status,
+			[string[]]$Lines,
+			$OutputSize = $null,
+			[bool]$BackupMade = $false
+		)
+		[PSCustomObject]@{
+			File       = $relativePath
+			Status     = $Status
+			LogLines   = $Lines
+			InputSize  = $fileSize
+			OutputSize = $OutputSize
+			BackupMade = $BackupMade
+		}
+	}
+
+	# Удаляет только собственные артефакты этого файла (включая временный файл CLI)
+	function Remove-JobLeftovers {
+		$leftovers = @(
+			$localNewFile, $tempNewFile,
+			($localNewFile + ".tmp.decomp"), ($tempNewFile + ".tmp.decomp")
+		)
+		foreach ($f in $leftovers) {
+			if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+		}
+	}
+
+	function Test-BundleHeader {
+		param([string]$Path)
+		$header = New-Object byte[] 7
+		$fs = [System.IO.File]::OpenRead($Path)
+		try { [void]$fs.Read($header, 0, 7) } finally { $fs.Dispose() }
+		return ([System.Text.Encoding]::ASCII.GetString($header) -eq "UnityFS")
+	}
+
+	function Test-FileIntact {
+		param([string]$Path)
+		if (-not (Test-Path -LiteralPath $Path)) { return $false }
+		return ((Get-Item -LiteralPath $Path).Length -gt 0)
+	}
 
 	# [6.2] Предпроверка: файл не заблокирован
 	try {
 		$stream = [System.IO.File]::Open($filePath, 'Open', 'ReadWrite', 'None')
-		$stream.Close()
 		$stream.Dispose()
 	}
 	catch {
-		return [PSCustomObject]@{
-			File	   = $relativePath
-			Status	 = "FAIL"
-			LogLines   = @("FAIL: файл заблокирован — $($_.Exception.Message)")
-			InputSize  = $fileSize
-			OutputSize = $null
-			BackupMade = $false
-		}
+		return New-JobResult "FAIL" @("FAIL: файл заблокирован — $($_.Exception.Message)")
 	}
 
+	$result = $null
 	try {
-		# Очистка артефактов предыдущих запусков
-		foreach ($f in @($localNewFile, $tempNewFile)) {
-			if (Test-Path $f) { Remove-Item -Force $f -ErrorAction SilentlyContinue }
-		}
+		Remove-JobLeftovers
 
-		$output   = & $CliPath $filePath $newFile -c $CompressionMode 2>&1
-		$exitCode = $LASTEXITCODE
+		# --no-update: библиотека уже подготовлена родительским скриптом перед запуском потоков
+		$output      = & $CliPath $filePath $newFile -c $CompressionMode --no-update 2>&1
+		$exitCode    = $LASTEXITCODE
 		$outputLines = @($output | ForEach-Object { [string]$_ })
 
-		# ── Проверка: файл уже сжат нужным методом ──
 		$skipMarker = switch ($CompressionMode) {
-			"lzma"	{ "SKIPPED_ALREADY_LZMA" }
-			"lz4"	 { "SKIPPED_ALREADY_LZ4" }
+			"lzma"    { "SKIPPED_ALREADY_LZMA" }
+			"lz4"     { "SKIPPED_ALREADY_LZ4" }
 			"lz4fast" { "SKIPPED_ALREADY_LZ4" }
 			default   { "SKIPPED_ALREADY_COMPRESSED" }
 		}
 
 		if ($outputLines -contains $skipMarker) {
-			return [PSCustomObject]@{
-				File	   = $relativePath
-				Status	 = "NOT_APPLIED"
-				LogLines   = @("NOT_APPLIED файл уже сжат в $CompressionModeDisplay") + $outputLines
-				InputSize  = $fileSize
-				OutputSize = $null
-				BackupMade = $false
-			}
+			$result = New-JobResult "NOT_APPLIED" (@("NOT_APPLIED файл уже сжат в $CompressionModeDisplay") + $outputLines)
 		}
-
-		# ── CLI вернул ошибку ──
-		if ($exitCode -ne 0) {
-			return [PSCustomObject]@{
-				File	   = $relativePath
-				Status	 = "FAIL"
-				LogLines   = @("FAIL: CLI завершился с кодом $exitCode") + $outputLines
-				InputSize  = $fileSize
-				OutputSize = $null
-				BackupMade = $false
-			}
+		elseif ($exitCode -ne 0) {
+			$result = New-JobResult "FAIL" (@("FAIL: CLI завершился с кодом $exitCode") + $outputLines)
 		}
-
-		# ── Выходной файл не создан или пуст ──
-		if ((-not (Test-Path $newFile)) -or ((Get-Item $newFile).Length -le 0)) {
-			return [PSCustomObject]@{
-				File	   = $relativePath
-				Status	 = "NOT_APPLIED"
-				LogLines   = @("NOT_APPLIED выходной файл не создан или пуст") + $outputLines
-				InputSize  = $fileSize
-				OutputSize = $null
-				BackupMade = $false
-			}
+		elseif (-not (Test-FileIntact -Path $newFile)) {
+			$result = New-JobResult "NOT_APPLIED" (@("NOT_APPLIED выходной файл не создан или пуст") + $outputLines)
 		}
-
-		# ── Бэкап: Move оригинала (мгновенный rename на одном диске) ──
-		# [1.3] Сохраняем относительный путь в структуре backup
-		$backupFile	= Join-Path $BackupDir $relativePath
-		$backupSubDir  = Split-Path $backupFile -Parent
-
-		if (-not (Test-Path $backupFile)) {
-			if (-not (Test-Path $backupSubDir)) {
+		elseif (-not (Test-BundleHeader -Path $newFile)) {
+			$result = New-JobResult "FAIL" (@("FAIL: выходной файл не похож на Unity bundle (нет сигнатуры UnityFS). Оригинал не изменён") + $outputLines)
+		}
+		elseif (Test-Path -LiteralPath $backupFile) {
+			# Существующий backup мог бы подменить оригинал при откате — не перезаписываем
+			$result = New-JobResult "FAIL" @("FAIL: в backup уже есть файл: $backupFile. Оригинал не изменён; перенесите или удалите старый backup")
+		}
+		else {
+			# [1.3] Бэкап с сохранением относительного пути
+			$backupSubDir = Split-Path $backupFile -Parent
+			if (-not (Test-Path -LiteralPath $backupSubDir)) {
 				New-Item -ItemType Directory -Force -Path $backupSubDir | Out-Null
 			}
 			# [3.2] Move вместо Copy — мгновенно на одном томе
-			Move-Item -Force $filePath $backupFile
-		}
+			Move-Item -LiteralPath $filePath -Destination $backupFile
+			$state.BackupMoved = $true
 
-		# ── Замена: перемещаем новый файл на место оригинала ──
-		Move-Item -Force $newFile $filePath
+			# Замена оригинала новым файлом
+			Move-Item -LiteralPath $newFile -Destination $filePath
 
-		# [1.2] Валидация после замены
-		if ((-not (Test-Path $filePath)) -or ((Get-Item $filePath).Length -le 0)) {
-			# Откат из бэкапа
-			if (Test-Path $backupFile) {
-				Move-Item -Force $backupFile $filePath
+			# [1.2] Валидация после замены
+			if (-not (Test-FileIntact -Path $filePath)) {
+				throw "файл после замены отсутствует или пуст"
 			}
-			return [PSCustomObject]@{
-				File	   = $relativePath
-				Status	 = "FAIL"
-				LogLines   = @("FAIL: файл после замены отсутствует или пуст, выполнен откат") + $outputLines
-				InputSize  = $fileSize
-				OutputSize = $null
-				BackupMade = $false
-			}
-		}
 
-		$outputSize = (Get-Item $filePath).Length
-
-		return [PSCustomObject]@{
-			File	   = $relativePath
-			Status	 = "OK"
-			LogLines   = $outputLines
-			InputSize  = $fileSize
-			OutputSize = $outputSize
-			BackupMade = $true
+			$outputSize = (Get-Item -LiteralPath $filePath).Length
+			$result = New-JobResult "OK" $outputLines $outputSize $true
 		}
 	}
 	catch {
-		# Очистка артефактов
-		foreach ($f in @($localNewFile, $tempNewFile)) {
-			if (Test-Path $f) { Remove-Item -Force $f -ErrorAction SilentlyContinue }
+		$msg = $_.Exception.Message
+		# K7: если оригинал уже перенесён в backup, а на месте его нет — возвращаем его
+		if ($state.BackupMoved -and (Test-Path -LiteralPath $backupFile) -and -not (Test-FileIntact -Path $filePath)) {
+			try {
+				Move-Item -LiteralPath $backupFile -Destination $filePath -Force
+				$msg += " (оригинал восстановлен из backup)"
+			}
+			catch {
+				$msg += " ВНИМАНИЕ: не удалось восстановить оригинал, он находится в: $backupFile"
+			}
 		}
-		return [PSCustomObject]@{
-			File	   = $relativePath
-			Status	 = "FAIL"
-			LogLines   = @("FAIL: $($_.Exception.Message)")
-			InputSize  = $fileSize
-			OutputSize = $null
-			BackupMade = $false
-		}
+		$result = New-JobResult "FAIL" @("FAIL: $msg")
 	}
+
+	if ($result.Status -ne "OK") {
+		Remove-JobLeftovers
+	}
+
+	return $result
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -640,6 +651,7 @@ function Start-ProcessingJobs {
 	)
 
 	$jobs	= [System.Collections.Generic.List[object]]::new()
+	$jobFiles = @{}
 	$results = [System.Collections.Generic.List[PSCustomObject]]::new()
 	$total   = $Files.Count
 	$queued  = 0
@@ -664,6 +676,7 @@ function Start-ProcessingJobs {
 				$CompressionModeDisplay
 
 			$jobs.Add($job)
+			$jobFiles[$job.Id] = $relativePath
 			$queued++
 		}
 
@@ -691,7 +704,7 @@ function Start-ProcessingJobs {
 			}
 			catch {
 				$results.Add([PSCustomObject]@{
-					File	   = "unknown"
+					File	   = $(if ($jobFiles.ContainsKey($dj.Id)) { $jobFiles[$dj.Id] } else { "unknown" })
 					Status	 = "FAIL"
 					LogLines   = @("FAIL: job exception — $($_.Exception.Message)")
 					InputSize  = $null
@@ -726,7 +739,9 @@ function Remove-Artifacts {
 		[string]$TempDir
 	)
 	# Удалить .new файлы-артефакты
-	Get-ChildItem -Path $SourceDir -Filter "*.new" -Recurse -ErrorAction SilentlyContinue |
+	# Только собственные артефакты: <имя>.bundle.new / .unity3d.new и их .tmp.decomp
+	Get-ChildItem -Path $SourceDir -File -Recurse -ErrorAction SilentlyContinue |
+		Where-Object { $_.Name -match '\.(bundle|unity3d)\.new(\.tmp\.decomp)?$' } |
 		Remove-Item -Force -ErrorAction SilentlyContinue
 
 	# Удалить temp если есть
@@ -739,9 +754,11 @@ function Remove-Artifacts {
 # Проверка зависимостей
 # ══════════════════════════════════════════════════════════════
 
-if (-not (Test-Path $CliPath)) {
-	Show-ErrorMessage -Text "Не найден BundleRecompressCli.exe рядом со скриптом:`n$CliPath" -DelayMs 3000
-	exit 1
+foreach ($requiredFile in @($CliPath, $WorkerPath)) {
+	if (-not (Test-Path $requiredFile)) {
+		Show-ErrorMessage -Text "Не найден необходимый файл утилиты:`n$requiredFile" -DelayMs 3000
+		exit 1
+	}
 }
 
 New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
@@ -786,6 +803,25 @@ Show-MainSummary -SourceDir $SourceDir -FileCount $files.Count `
 	-CompressionModeDisplay $CompressionModeDisplay -MaxParallel $MaxParallel
 
 # ══════════════════════════════════════════════════════════════
+# Подготовка библиотеки AssetsTools.NET
+# Обновление выполняется один раз ДО запуска потоков: иначе параллельные процессы
+# могли бы заменять DLL, которую уже держит другой процесс.
+# ══════════════════════════════════════════════════════════════
+
+Write-Host "Проверка библиотеки AssetsTools.NET..." -ForegroundColor Cyan
+& $CliPath --update
+if ($LASTEXITCODE -ne 0) {
+	Write-Host "Не удалось подготовить AssetsTools.NET (код $LASTEXITCODE). См. сообщения выше." -ForegroundColor Red
+	Read-Host "Нажмите Enter для выхода" | Out-Null
+	exit 1
+}
+if (-not (Test-Path $LibraryPath)) {
+	Write-Host "Не найдена библиотека: $LibraryPath" -ForegroundColor Red
+	Read-Host "Нажмите Enter для выхода" | Out-Null
+	exit 1
+}
+
+# ══════════════════════════════════════════════════════════════
 # Подготовка папок и переменных
 # ══════════════════════════════════════════════════════════════
 
@@ -820,11 +856,12 @@ try {
 	$driveInfo = [System.IO.DriveInfo]::new($driveRoot)
 	$freeSpace = $driveInfo.AvailableFreeSpace
 
-	if ($freeSpace -lt $totalFilesSize) {
-		$neededGb = [math]::Round($totalFilesSize / 1GB, 2)
+	$neededBytes = $totalFilesSize * 2
+	if ($freeSpace -lt $neededBytes) {
+		$neededGb = [math]::Round($neededBytes / 1GB, 2)
 		$freeGb   = [math]::Round($freeSpace / 1GB, 2)
 		Show-WarningMessage -Text ("Может не хватить места на диске!`n" +
-			"Нужно ~$neededGb GB для бэкапа, свободно $freeGb GB`n" +
+			"Нужно ~$neededGb GB (с запасом на распаковку и backup), свободно $freeGb GB`n" +
 			"Продолжаем, но возможны ошибки.") -DelayMs 3000
 	}
 }

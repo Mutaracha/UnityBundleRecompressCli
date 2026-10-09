@@ -11,8 +11,10 @@
     <ApplicationIcon>logo.ico</ApplicationIcon>
   </PropertyGroup>
 
-  <!-- This is the exact package version recorded by the updater state for
-       the currently tested DLL. The SHA-256 is verified in CI. -->
+  <!-- Версия AssetsTools.NET, с которой собирается и тестируется утилита.
+       SHA-256 сборочной DLL проверяется в CI. У пользователя Bootstrap
+       (BundleRecompressCli.exe) может обновить DLL до новой совместимой
+       версии из NuGet. -->
   <ItemGroup>
     <Compile Remove="Bootstrap\**" />
     <None Remove="Bootstrap\**" />

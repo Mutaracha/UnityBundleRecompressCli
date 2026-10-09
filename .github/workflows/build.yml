@@ -29,7 +29,7 @@ jobs:
       - name: Build bootstrap
         run: dotnet build Bootstrap/Bootstrap.csproj --configuration Release --no-restore
 
-      - name: Verify pinned AssetsTools.NET binary
+      - name: Verify pinned AssetsTools.NET binary (build-time pin)
         shell: pwsh
         run: |
           $dll = Join-Path $env:GITHUB_WORKSPACE 'bin/Release/net48/AssetsTools.NET.dll'
@@ -54,15 +54,32 @@ jobs:
             throw "Worker help command failed with exit code $LASTEXITCODE"
           }
 
+      - name: Verify ps1 syntax
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $env:GITHUB_WORKSPACE 'release/bin/batch_lzma_cli_pwsh.ps1'), [ref]$null, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; throw 'PowerShell syntax errors' }
+
       - name: Package artifact
         shell: pwsh
         run: |
-          $output = Join-Path $env:GITHUB_WORKSPACE 'artifact'
-          New-Item -ItemType Directory -Force -Path $output | Out-Null
-          Copy-Item 'Bootstrap/bin/Release/net48/BundleRecompressCli.exe' $output
-          Copy-Item 'bin/Release/net48/BundleRecompressCli.Worker.exe' $output
-          Copy-Item 'bin/Release/net48/AssetsTools.NET.dll' $output
-          Compress-Archive -Path "$output/*" -DestinationPath 'BundleRecompressCli-win-x64.zip' -Force
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/package.ps1') `
+            -WorkerOutDir (Join-Path $env:GITHUB_WORKSPACE 'bin/Release/net48') `
+            -BootstrapOutDir (Join-Path $env:GITHUB_WORKSPACE 'Bootstrap/bin/Release/net48') `
+            -TemplateDir (Join-Path $env:GITHUB_WORKSPACE 'release') `
+            -StagingDir (Join-Path $env:GITHUB_WORKSPACE 'artifact/staging') `
+            -ZipPath (Join-Path $env:GITHUB_WORKSPACE 'BundleRecompressCli-win-x64.zip')
+
+      - name: Smoke test packaged CLI
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:GITHUB_WORKSPACE 'artifact/staging'
+          $exe = Join-Path $staging 'bin/BundleRecompressCli.exe'
+          # --no-update: в CI не ходим в сеть; проверяем запуск Bootstrap -> Worker
+          & $exe --no-update --help
+          if ($LASTEXITCODE -ne 0) { throw "Packaged CLI help failed with exit code $LASTEXITCODE" }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
