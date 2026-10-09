@@ -238,6 +238,8 @@ internal static class Program
 
                 if (localHash == null)
                     message = $"AssetsTools.NET загружена: версия {version}.";
+                else if (state.InstalledVersion == null)
+                    message = $"AssetsTools.NET заменена на версию {version} (версия прежней DLL неизвестна, файла состояния не было).";
                 else if (string.Equals(previousVersion, version, StringComparison.Ordinal))
                     message = $"AssetsTools.NET восстановлена: версия {version} (файл был изменён вне утилиты).";
                 else
