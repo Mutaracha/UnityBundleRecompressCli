@@ -15,12 +15,16 @@ using System.Web.Script.Serialization;
 //
 // Флаги Bootstrap (вырезаются из аргументов, Worker их не получает):
 //   --update     принудительно проверить и при необходимости обновить библиотеку
+//   --prepare    подготовка перед работой (скрипт вызывает в начале): проверка наличия DLL,
+//                проверка обновлений не чаще раза в сутки; ничего больше не запускает
 //   --no-update  не ходить в сеть (библиотека всё равно устанавливается, если её нет)
 //
+// Наличие DLL проверяется при любом запуске. Если DLL нет — она устанавливается (ошибка фатальна).
 // Проверка обновлений (сеть) выполняется:
 //   - при --update (принудительно);
-//   - при перепаковке (есть -c), не чаще раза в сутки, если не задан --no-update.
-// Справка, информация о файле (-i / перетаскивание) и двойной клик сеть не используют.
+//   - при --prepare и при перепаковке (есть -c), не чаще раза в сутки, если не задан --no-update.
+// Справка, информация о файле (-i / перетаскивание) и двойной клик сеть не используют,
+// если DLL уже на месте.
 //
 // Состояние (.assetstools_update_state.txt, key=value):
 //   LastCheckUtc          время последней успешной проверки
@@ -57,16 +61,17 @@ internal static class Program
             if (forceUpdate && noUpdate)
                 throw new ArgumentException("Параметры --update и --no-update нельзя использовать одновременно.");
 
+            bool prepare = HasFlag(args, "--prepare");
             bool isRecompress = HasFlag(args, "-c");
-            bool allowCheck = forceUpdate || (isRecompress && !noUpdate);
+            bool allowCheck = forceUpdate || (prepare && !noUpdate) || (isRecompress && !noUpdate);
 
             string baseDir = AppContext.BaseDirectory;
             EnsureLibrary(baseDir, forceUpdate, allowCheck);
 
             string[] workerArgs = args.Where(a => !IsBootstrapFlag(a)).ToArray();
 
-            // Только флаги обновления — дальше ничего не делаем.
-            if (forceUpdate && workerArgs.Length == 0)
+            // Только флаги подготовки — дальше ничего не делаем.
+            if ((forceUpdate || prepare) && workerArgs.Length == 0)
                 return 0;
 
             string workerPath = Path.Combine(baseDir, WorkerName);
@@ -249,7 +254,7 @@ internal static class Program
             state.InstalledVersion = version;
             state.InstalledPackageSha512 = actualSha512;
             state.InstalledDllSha256 = newHash;
-            return message + "\n  пакет SHA-512 проверен с NuGet.";
+            return message + $"\n  пакет SHA-512 проверен с NuGet; из архива: {entry.FullName}";
         }
         catch
         {
@@ -363,7 +368,8 @@ internal static class Program
 
     private static bool IsBootstrapFlag(string arg) =>
         arg.Equals("--update", StringComparison.OrdinalIgnoreCase) ||
-        arg.Equals("--no-update", StringComparison.OrdinalIgnoreCase);
+        arg.Equals("--no-update", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("--prepare", StringComparison.OrdinalIgnoreCase);
 
     private static void WriteColored(ConsoleColor color, string text)
     {

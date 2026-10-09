@@ -763,6 +763,25 @@ foreach ($requiredFile in @($CliPath, $WorkerPath)) {
 
 
 # ══════════════════════════════════════════════════════════════
+# Подготовка библиотеки AssetsTools.NET
+# Выполняется В НАЧАЛЕ работы скрипта: наличие DLL и суточная проверка обновлений.
+# Один раз до запуска потоков: иначе параллельные процессы могли бы заменять DLL, которую уже держит
+# другой процесс. Дочерние запуски идут с --no-update.
+# ══════════════════════════════════════════════════════════════
+
+& $CliPath --prepare
+if ($LASTEXITCODE -ne 0) {
+	Write-Host "Не удалось подготовить AssetsTools.NET (код $LASTEXITCODE). См. сообщения выше." -ForegroundColor Red
+	Read-Host "Нажмите Enter для выхода" | Out-Null
+	exit 1
+}
+if (-not (Test-Path $LibraryPath)) {
+	Write-Host "Не найдена библиотека: $LibraryPath" -ForegroundColor Red
+	Read-Host "Нажмите Enter для выхода" | Out-Null
+	exit 1
+}
+
+# ══════════════════════════════════════════════════════════════
 # Выбор папки, рекурсии и проверка файлов
 # ══════════════════════════════════════════════════════════════
 
@@ -800,24 +819,6 @@ $MaxParallel			= Select-ThreadCount
 
 Show-MainSummary -SourceDir $SourceDir -FileCount $files.Count `
 	-CompressionModeDisplay $CompressionModeDisplay -MaxParallel $MaxParallel
-
-# ══════════════════════════════════════════════════════════════
-# Подготовка библиотеки AssetsTools.NET
-# Проверка обновлений (--update) выполняется один раз ДО запуска потоков: иначе параллельные процессы
-# могли бы заменять DLL, которую уже держит другой процесс. Дочерние запуски идут с --no-update.
-# ══════════════════════════════════════════════════════════════
-
-& $CliPath --update
-if ($LASTEXITCODE -ne 0) {
-	Write-Host "Не удалось подготовить AssetsTools.NET (код $LASTEXITCODE). См. сообщения выше." -ForegroundColor Red
-	Read-Host "Нажмите Enter для выхода" | Out-Null
-	exit 1
-}
-if (-not (Test-Path $LibraryPath)) {
-	Write-Host "Не найдена библиотека: $LibraryPath" -ForegroundColor Red
-	Read-Host "Нажмите Enter для выхода" | Out-Null
-	exit 1
-}
 
 # ══════════════════════════════════════════════════════════════
 # Подготовка папок и переменных
