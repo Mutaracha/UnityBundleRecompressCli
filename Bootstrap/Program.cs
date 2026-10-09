@@ -162,8 +162,9 @@ internal static class Program
                 }
                 else
                 {
-                    InstallVersion(latest, dllPath, state);
+                    Console.WriteLine(InstallVersion(latest, dllPath, localHash, state));
                 }
+                Console.WriteLine($"  SHA-256 DLL: {Hash(dllPath)}");
 
                 state.LastCheckUtc = DateTime.UtcNow;
                 SaveState(statePath, state);
@@ -187,7 +188,8 @@ internal static class Program
     /// Скачивает пакет версии, сверяет SHA-512 с packageHash из NuGet, устанавливает DLL и обновляет состояние.
     /// При любой ошибке старая DLL остаётся на месте.
     /// </summary>
-    private static void InstallVersion(string version, string dllPath, UpdateState state)
+    /// <summary>Возвращает текст результата для вывода в консоль.</summary>
+    private static string InstallVersion(string version, string dllPath, string? localHash, UpdateState state)
     {
         string backupPath = dllPath + ".bak";
         string tempPath = dllPath + ".tmp";
@@ -218,17 +220,34 @@ internal static class Program
                 source.CopyTo(target);
 
             string newHash = Hash(tempPath);
+            string previousVersion = state.InstalledVersion ?? "неизвестна";
+            string message;
 
-            if (File.Exists(backupPath)) File.Delete(backupPath);
-            if (File.Exists(dllPath)) File.Move(dllPath, backupPath);
-            File.Move(tempPath, dllPath);
-            if (File.Exists(backupPath)) File.Delete(backupPath);
+            if (localHash != null && string.Equals(localHash, newHash, StringComparison.OrdinalIgnoreCase))
+            {
+                // Файл на диске уже совпадает с пакетом NuGet — заменять нечего.
+                File.Delete(tempPath);
+                message = $"AssetsTools.NET {version} — актуальная версия (файл совпадает с NuGet).";
+            }
+            else
+            {
+                if (File.Exists(backupPath)) File.Delete(backupPath);
+                if (File.Exists(dllPath)) File.Move(dllPath, backupPath);
+                File.Move(tempPath, dllPath);
+                if (File.Exists(backupPath)) File.Delete(backupPath);
+
+                if (localHash == null)
+                    message = $"AssetsTools.NET загружена: версия {version}.";
+                else if (string.Equals(previousVersion, version, StringComparison.Ordinal))
+                    message = $"AssetsTools.NET восстановлена: версия {version} (файл был изменён вне утилиты).";
+                else
+                    message = $"AssetsTools.NET обновлена: {previousVersion} -> {version}.";
+            }
 
             state.InstalledVersion = version;
             state.InstalledPackageSha512 = actualSha512;
             state.InstalledDllSha256 = newHash;
-            Console.WriteLine($"AssetsTools.NET установлена: версия {version}.");
-            Console.WriteLine($"  пакет SHA-512 проверен с NuGet; DLL SHA-256: {newHash}");
+            return message + "\n  пакет SHA-512 проверен с NuGet.";
         }
         catch
         {
