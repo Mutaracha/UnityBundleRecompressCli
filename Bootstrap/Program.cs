@@ -213,7 +213,10 @@ internal static class Program
         {
             using var packageStream = new MemoryStream(packageBytes);
             using var archive = new ZipArchive(packageStream, ZipArchiveMode.Read);
-            var entry = archive.GetEntry($"lib/netstandard2.0/{DllName}") ??
+            // Та же сборка, что получает проект net48 при restore (lib/net40): её хеш зафиксирован в CI.
+            // netstandard2.0 — запасной вариант.
+            var entry = archive.GetEntry($"lib/net40/{DllName}") ??
+                        archive.GetEntry($"lib/netstandard2.0/{DllName}") ??
                         archive.Entries.FirstOrDefault(e =>
                             e.Name.Equals(DllName, StringComparison.OrdinalIgnoreCase) &&
                             e.FullName.StartsWith("lib/", StringComparison.OrdinalIgnoreCase));
