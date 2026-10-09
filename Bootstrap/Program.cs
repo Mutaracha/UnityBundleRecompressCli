@@ -1,13 +1,16 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
+using System.Web.Script.Serialization;
 
 // Bootstrap (BundleRecompressCli.exe): единственное место, где проверяется и
 // обновляется AssetsTools.NET (NuGet). Затем запускает рабочий процесс
 // BundleRecompressCli.Worker.exe с переданными аргументами.
+//
+// Только стандартная библиотека .NET Framework 4.8 (System.Web.Extensions входит в состав ОС/фреймворка).
 //
 // Флаги Bootstrap (вырезаются из аргументов, Worker их не получает):
 //   --update     принудительно проверить/обновить библиотеку
@@ -19,7 +22,7 @@ internal static class Program
 {
     private const string DllName = "AssetsTools.NET.dll";
     private const string WorkerName = "BundleRecompressCli.Worker.exe";
-    private const string StateName = ".assetstools_update_state.json";
+    private const string StateName = ".assetstools_update_state.txt";
     private const string MutexName = @"Local\BundleRecompressCli.AssetsToolsUpdate";
     private const int CheckIntervalDays = 1;
     private const int ExitError = 10;
@@ -31,6 +34,9 @@ internal static class Program
         bool interactive = args.Length == 0;
         try
         {
+            // NuGet принимает только TLS 1.2+; на .NET Framework 4.8 это не всегда включено по умолчанию.
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+
             bool forceUpdate = HasFlag(args, "--update");
             bool noUpdate = HasFlag(args, "--no-update");
 
@@ -38,7 +44,7 @@ internal static class Program
                 throw new ArgumentException("Параметры --update и --no-update нельзя использовать одновременно.");
 
             string baseDir = AppContext.BaseDirectory;
-            EnsureLibraryAsync(baseDir, forceUpdate, noUpdate).GetAwaiter().GetResult();
+            EnsureLibrary(baseDir, forceUpdate, noUpdate);
 
             string[] workerArgs = args.Where(a => !IsBootstrapFlag(a)).ToArray();
 
@@ -50,7 +56,7 @@ internal static class Program
             if (!File.Exists(workerPath))
                 throw new FileNotFoundException("Не найден основной файл утилиты.", workerPath);
 
-            // Двойной клик: показываем справку через Worker; паузу делает Bootstrap.
+            // Двойной клик: справка через Worker; паузу делает Bootstrap.
             if (interactive)
                 workerArgs = new[] { "--help" };
 
@@ -92,11 +98,11 @@ internal static class Program
 
     /// <summary>
     /// Гарантирует наличие AssetsTools.NET.dll.
-    /// - Если DLL отсутствует — устанавливает её (ошибка фатальна).
-    /// - Если DLL есть — проверяет обновление (не чаще раза в сутки, либо при --update).
-    ///   Ошибки сети/NuGet здесь НЕ фатальны: используется установленная версия.
+    /// - DLL отсутствует — устанавливаем (ошибка фатальна).
+    /// - DLL есть — проверяем обновление (раз в сутки или при --update). Сбой сети/NuGet не фатален.
+    /// Метод синхронный намеренно: мьютекс должен освобождаться тем же потоком, который его захватил.
     /// </summary>
-    private static async Task EnsureLibraryAsync(string baseDir, bool force, bool noUpdate)
+    private static void EnsureLibrary(string baseDir, bool force, bool noUpdate)
     {
         string dllPath = Path.Combine(baseDir, DllName);
         string statePath = Path.Combine(baseDir, StateName);
@@ -114,7 +120,7 @@ internal static class Program
             if (!entered)
                 throw new TimeoutException("Не удалось получить блокировку обновления AssetsTools.NET.");
 
-            // Состояние читаем уже под блокировкой: другой процесс мог обновить библиотеку.
+            // Состояние читаем под блокировкой: другой процесс мог уже обновить библиотеку.
             var state = LoadState(statePath);
             string? localHash = present ? Hash(dllPath) : null;
 
@@ -131,13 +137,13 @@ internal static class Program
 
             try
             {
-                string version = await GetLatestVersionAsync();
+                string version = GetLatestVersion();
                 state.LastKnownVersion = version;
-                await DownloadAndInstallAsync(version, dllPath, localHash, state);
+                DownloadAndInstall(version, dllPath, localHash, state);
             }
             catch (Exception ex) when (localHash != null)
             {
-                // Библиотека уже есть: продолжаем работу на установленной версии.
+                // Библиотека уже есть: работаем на установленной версии.
                 WriteColored(ConsoleColor.Yellow,
                     $"ПРЕДУПРЕЖДЕНИЕ: не удалось проверить/обновить AssetsTools.NET: {ex.Message}");
                 WriteColored(ConsoleColor.Yellow, "Используется установленная версия.");
@@ -152,30 +158,25 @@ internal static class Program
         }
     }
 
-    private static async Task<string> GetLatestVersionAsync()
+    private static string GetLatestVersion()
     {
-        using var client = CreateHttpClient();
-        using var document = JsonDocument.Parse(await client.GetStringAsync(IndexUrl));
-        var versions = document.RootElement.GetProperty("versions").EnumerateArray()
-            .Select(x => x.GetString())
-            .Where(x => !string.IsNullOrEmpty(x))
-            .Cast<string>()
-            .Where(x => !x.Contains('-'))
+        string json = GetString(IndexUrl);
+        var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+        var versions = ((System.Collections.IEnumerable)root["versions"])
+            .Cast<object>()
+            .Select(v => v?.ToString())
+            .Where(v => !string.IsNullOrEmpty(v) && !v!.Contains('-'))
             .ToList();
         return versions.LastOrDefault()
                ?? throw new InvalidDataException("NuGet не вернул стабильные версии AssetsTools.NET.");
     }
 
-    private static async Task DownloadAndInstallAsync(string version, string dllPath, string? localHash, UpdateState state)
+    private static void DownloadAndInstall(string version, string dllPath, string? localHash, UpdateState state)
     {
         string backupPath = dllPath + ".bak";
         string tempPath = dllPath + ".tmp";
 
-        byte[] packageBytes;
-        using (var client = CreateHttpClient())
-        {
-            packageBytes = await client.GetByteArrayAsync(string.Format(PackageUrl, version.ToLowerInvariant()));
-        }
+        byte[] packageBytes = GetBytes(string.Format(PackageUrl, version.ToLowerInvariant()));
 
         try
         {
@@ -190,7 +191,7 @@ internal static class Program
 
             using (var source = entry.Open())
             using (var target = File.Create(tempPath))
-                await source.CopyToAsync(target);
+                source.CopyTo(target);
 
             string newHash = Hash(tempPath);
 
@@ -217,29 +218,57 @@ internal static class Program
         }
     }
 
-    private static HttpClient CreateHttpClient()
+    private static string GetString(string url) => Encoding.UTF8.GetString(GetBytes(url));
+
+    private static byte[] GetBytes(string url)
     {
-        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("BundleRecompressCli/1.0");
-        return client;
+        return client.GetByteArrayAsync(url).GetAwaiter().GetResult();
     }
 
+    // Простой текстовый формат состояния (key=value), без внешних библиотек.
     private static UpdateState LoadState(string path)
     {
+        var state = new UpdateState();
         try
         {
-            if (File.Exists(path))
-                return JsonSerializer.Deserialize<UpdateState>(File.ReadAllText(path)) ?? new UpdateState();
+            if (!File.Exists(path)) return state;
+            foreach (string line in File.ReadAllLines(path))
+            {
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                string key = line.Substring(0, eq).Trim();
+                string value = line.Substring(eq + 1).Trim();
+                switch (key)
+                {
+                    case "LastCheckUtc":
+                        if (DateTime.TryParse(value, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                            state.LastCheckUtc = dt;
+                        break;
+                    case "LastKnownVersion":
+                        state.LastKnownVersion = value;
+                        break;
+                    case "InstalledDllHash":
+                        state.InstalledDllHash = value;
+                        break;
+                }
+            }
         }
         catch { }
-        return new UpdateState();
+        return state;
     }
 
     private static void SaveState(string path, UpdateState state)
     {
         try
         {
-            File.WriteAllText(path, JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllLines(path, new[]
+            {
+                "LastCheckUtc=" + state.LastCheckUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+                "LastKnownVersion=" + (state.LastKnownVersion ?? ""),
+                "InstalledDllHash=" + (state.InstalledDllHash ?? "")
+            });
         }
         catch { }
     }

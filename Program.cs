@@ -6,7 +6,6 @@ using System.Linq;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Diagnostics;
-using System.Text.Json;
 using System.Threading.Tasks;
 using AssetsTools.NET;
 using AssetsTools.NET.Extra;
@@ -254,8 +253,9 @@ internal static class ArgumentParser
 /// Хелпер для работы с типами сжатия
 internal static class CompressionHelper
 {
-	public static bool TryParse(string modeText, out AssetBundleCompressionType compType)
+	public static bool TryParse(string? modeText, out AssetBundleCompressionType compType)
 	{
+		modeText ??= string.Empty;
 		compType = modeText.ToLowerInvariant() switch
 		{
 			"lzma" => AssetBundleCompressionType.LZMA,

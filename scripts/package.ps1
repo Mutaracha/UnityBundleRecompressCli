@@ -9,7 +9,7 @@
       BundleRecompressCli.exe           (Bootstrap)
       BundleRecompressCli.Worker.exe    (рабочий процесс)
       AssetsTools.NET.dll
-      System.Text.Json.dll и зависимости
+      (внешних DLL, кроме AssetsTools.NET.dll, быть не должно)
       7za.exe                           (опционально, если лежит в шаблоне)
 
 .PARAMETER WorkerOutDir
@@ -61,13 +61,19 @@ New-Item -ItemType Directory -Force -Path $bin | Out-Null
 Copy-Required (Join-Path $BootstrapOutDir 'BundleRecompressCli.exe')        (Join-Path $bin 'BundleRecompressCli.exe')
 Copy-Required (Join-Path $WorkerOutDir    'BundleRecompressCli.Worker.exe') (Join-Path $bin 'BundleRecompressCli.Worker.exe')
 
-# 4. Зависимости: AssetsTools.NET и все runtime-DLL из сборок (System.Text.Json и его зависимости).
-#    Worker — приоритетнее (там же AssetsTools.NET); Bootstrap добирает недостающие.
+# 4. Зависимости. Политика: кроме AssetsTools.NET.dll внешних DLL быть не должно
+#    (стандарт — .NET Framework 4.8, System.* берётся из ОС).
+$allowedDlls = @('AssetsTools.NET.dll')
+Copy-Required (Join-Path $WorkerOutDir 'AssetsTools.NET.dll') (Join-Path $bin 'AssetsTools.NET.dll')
+
+$extraDlls = @()
 foreach ($dir in @($WorkerOutDir, $BootstrapOutDir)) {
-    Get-ChildItem -LiteralPath $dir -Filter *.dll -File | ForEach-Object {
-        $target = Join-Path $bin $_.Name
-        if (-not (Test-Path -LiteralPath $target)) { Copy-Item -LiteralPath $_.FullName -Destination $target }
-    }
+    $extraDlls += Get-ChildItem -LiteralPath $dir -Filter *.dll -File |
+        Where-Object { $allowedDlls -notcontains $_.Name } | ForEach-Object { $_.Name }
+}
+if ($extraDlls.Count -gt 0) {
+    throw ('Сборка подтянула внешние DLL, которых быть не должно: ' + (($extraDlls | Sort-Object -Unique) -join ', ') +
+        '. Проверьте зависимости csproj (ожидается только AssetsTools.NET).')
 }
 
 # 5. Проверка состава пакета
@@ -76,8 +82,7 @@ $required = @(
     'bin\batch_lzma_cli_pwsh.ps1',
     'bin\BundleRecompressCli.exe',
     'bin\BundleRecompressCli.Worker.exe',
-    'bin\AssetsTools.NET.dll',
-    'bin\System.Text.Json.dll'
+    'bin\AssetsTools.NET.dll'
 )
 $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $StagingDir $_)) })
 if ($missing.Count -gt 0) {

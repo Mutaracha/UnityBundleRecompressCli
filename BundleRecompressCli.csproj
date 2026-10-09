@@ -22,6 +22,5 @@
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
     <PackageReference Include="AssetsTools.NET" Version="3.0.5" />
-    <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 </Project>
