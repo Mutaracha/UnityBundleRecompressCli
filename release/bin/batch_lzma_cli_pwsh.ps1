@@ -1,4 +1,4 @@
-param()
+﻿param()
 $ErrorActionPreference = "Stop"
 
 # ── Версия скрипта ──
@@ -761,7 +761,6 @@ foreach ($requiredFile in @($CliPath, $WorkerPath)) {
 	}
 }
 
-New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
 # ══════════════════════════════════════════════════════════════
 # Выбор папки, рекурсии и проверка файлов
@@ -804,11 +803,10 @@ Show-MainSummary -SourceDir $SourceDir -FileCount $files.Count `
 
 # ══════════════════════════════════════════════════════════════
 # Подготовка библиотеки AssetsTools.NET
-# Обновление выполняется один раз ДО запуска потоков: иначе параллельные процессы
-# могли бы заменять DLL, которую уже держит другой процесс.
+# Проверка обновлений (--update) выполняется один раз ДО запуска потоков: иначе параллельные процессы
+# могли бы заменять DLL, которую уже держит другой процесс. Дочерние запуски идут с --no-update.
 # ══════════════════════════════════════════════════════════════
 
-Write-Host "Проверка библиотеки AssetsTools.NET..." -ForegroundColor Cyan
 & $CliPath --update
 if ($LASTEXITCODE -ne 0) {
 	Write-Host "Не удалось подготовить AssetsTools.NET (код $LASTEXITCODE). См. сообщения выше." -ForegroundColor Red
@@ -989,6 +987,7 @@ foreach ($res in ($results | Sort-Object File)) {
 
 $finalLog.Add("")
 $finalLog.Add(("[{0}] END" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")))
+New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 $finalLog | Set-Content -Path $LogFile -Encoding UTF8
 
 # ── Файлы со списком ошибок / пропусков ──

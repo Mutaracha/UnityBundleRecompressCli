@@ -30,8 +30,6 @@ echo [OK] Найден PowerShell 7
 echo [RUN] %PS7_SCRIPT%
 echo.
 
-if not exist "%ROOT%log" mkdir "%ROOT%log"
-
 cls
 pwsh -NoProfile -ExecutionPolicy Bypass -File "%PS7_SCRIPT%"
 set "RESULT=%errorlevel%"

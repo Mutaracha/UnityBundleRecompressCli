@@ -472,7 +472,9 @@ internal static class ConsoleOutput
 		Console.WriteLine("  " + FormatHelpLine("-p <file>", "Путь к progress-файлу для внешнего отслеживания"));
 		Console.WriteLine("  " + FormatHelpLine("-m", "Принудительно распаковывать в память (автоматически отключается при объёме данных более 1.5 GB)"));
 		Console.WriteLine("  " + FormatHelpLine("-f", "Принудительно распаковывать во временный файл"));
-		Console.WriteLine("  " + FormatHelpLine("--debug", "Включить отладочный вывод процесса обновления"));
+		Console.WriteLine("  " + FormatHelpLine("--debug", "Включить отладочный вывод"));
+		Console.WriteLine("  " + FormatHelpLine("--update", "Проверить и обновить AssetsTools.NET (обрабатывает BundleRecompressCli.exe)"));
+		Console.WriteLine("  " + FormatHelpLine("--no-update", "Не проверять обновления AssetsTools.NET (обрабатывает BundleRecompressCli.exe)"));
 		Console.WriteLine("  " + FormatHelpLine("-h, --help, /?", "Показать эту справку"));
 		Console.WriteLine();
 		Console.WriteLine("Методы сжатия:");
@@ -485,7 +487,8 @@ internal static class ConsoleOutput
 		Console.WriteLine("  - Если bundle сжат другим методом, он обработается с предварительной распаковкой");
 		Console.WriteLine("  - Для файлов меньше 500 МБ по умолчанию для распаковки используется память");
 		Console.WriteLine("  - Для файлов 500 МБ и больше используется временный файл");
-		Console.WriteLine("  - Обновление AssetsTools.NET выполняет BundleRecompressCli.exe (Bootstrap)");
+		Console.WriteLine("  - Проверка обновлений AssetsTools.NET выполняется при перепаковке (-c),");
+		Console.WriteLine("\tне чаще раза в сутки; для информации и справки сеть не используется");
 		Console.WriteLine();
 		Console.WriteLine("Примеры:");
 		Console.WriteLine(@"  BundleRecompressCli ""D:\in\test.bundle""");

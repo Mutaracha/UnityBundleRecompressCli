@@ -31,7 +31,9 @@ internal static class Program
 
     private static int Main(string[] args)
     {
-        bool interactive = args.Length == 0;
+        // Двойной клик (нет аргументов) и перетаскивание одного файла на exe: окно нужно задержать.
+        bool dragDropInfo = args.Length == 1 && !IsFlag(args[0]);
+        bool pauseAtEnd = args.Length == 0 || dragDropInfo;
         try
         {
             // NuGet принимает только TLS 1.2+; на .NET Framework 4.8 это не всегда включено по умолчанию.
@@ -43,8 +45,15 @@ internal static class Program
             if (forceUpdate && noUpdate)
                 throw new ArgumentException("Параметры --update и --no-update нельзя использовать одновременно.");
 
+            // Проверка обновлений выполняется только там, где она нужна:
+            //  - явный --update;
+            //  - перепаковка (есть -c), если не задан --no-update (не чаще раза в сутки).
+            // Справка, информация о файле (-i / перетаскивание) и двойной клик сеть не трогают.
+            bool isRecompress = HasFlag(args, "-c");
+            bool allowCheck = forceUpdate || (isRecompress && !noUpdate);
+
             string baseDir = AppContext.BaseDirectory;
-            EnsureLibrary(baseDir, forceUpdate, noUpdate);
+            EnsureLibrary(baseDir, forceUpdate, allowCheck);
 
             string[] workerArgs = args.Where(a => !IsBootstrapFlag(a)).ToArray();
 
@@ -56,13 +65,13 @@ internal static class Program
             if (!File.Exists(workerPath))
                 throw new FileNotFoundException("Не найден основной файл утилиты.", workerPath);
 
-            // Двойной клик: справка через Worker; паузу делает Bootstrap.
-            if (interactive)
+            // Двойной клик: справка через Worker.
+            if (args.Length == 0)
                 workerArgs = new[] { "--help" };
 
             int exitCode = RunWorker(workerPath, workerArgs);
 
-            if (interactive)
+            if (pauseAtEnd)
                 WaitForAnyKey();
 
             return exitCode;
@@ -70,11 +79,14 @@ internal static class Program
         catch (Exception ex)
         {
             WriteColored(ConsoleColor.Red, $"ОШИБКА: {ex.Message}");
-            if (interactive)
+            if (pauseAtEnd)
                 WaitForAnyKey();
             return ExitError;
         }
     }
+
+    private static bool IsFlag(string arg) =>
+        arg.StartsWith("-", StringComparison.Ordinal) || arg.StartsWith("/", StringComparison.Ordinal);
 
     // ───────────────────────── Запуск Worker ─────────────────────────
 
@@ -99,17 +111,17 @@ internal static class Program
     /// <summary>
     /// Гарантирует наличие AssetsTools.NET.dll.
     /// - DLL отсутствует — устанавливаем (ошибка фатальна).
-    /// - DLL есть — проверяем обновление (раз в сутки или при --update). Сбой сети/NuGet не фатален.
+    /// - DLL есть — проверяем обновление, если allowCheck (раз в сутки либо force). Сбой сети/NuGet не фатален.
     /// Метод синхронный намеренно: мьютекс должен освобождаться тем же потоком, который его захватил.
     /// </summary>
-    private static void EnsureLibrary(string baseDir, bool force, bool noUpdate)
+    private static void EnsureLibrary(string baseDir, bool force, bool allowCheck)
     {
         string dllPath = Path.Combine(baseDir, DllName);
         string statePath = Path.Combine(baseDir, StateName);
         bool present = File.Exists(dllPath);
 
-        // Библиотека на месте, проверка не запрошена — ничего не делаем.
-        if (present && noUpdate && !force)
+        // Библиотека на месте, проверка не нужна — ничего не делаем и не пишем в консоль.
+        if (present && !force && !allowCheck)
             return;
 
         using var mutex = new Mutex(false, MutexName);
@@ -140,6 +152,7 @@ internal static class Program
                 string version = GetLatestVersion();
                 state.LastKnownVersion = version;
                 DownloadAndInstall(version, dllPath, localHash, state);
+                Console.WriteLine($"AssetsTools.NET пакет {version}, SHA-256 DLL: {Hash(dllPath)}");
             }
             catch (Exception ex) when (localHash != null)
             {
@@ -176,7 +189,17 @@ internal static class Program
         string backupPath = dllPath + ".bak";
         string tempPath = dllPath + ".tmp";
 
-        byte[] packageBytes = GetBytes(string.Format(PackageUrl, version.ToLowerInvariant()));
+        string packageUrl = string.Format(PackageUrl, version.ToLowerInvariant());
+        byte[] packageBytes = GetBytes(packageUrl);
+
+        // Проверка целостности: NuGet публикует SHA-512 пакета (base64) рядом с ним.
+        // Не совпало или не получено — пакет не устанавливаем.
+        string expectedSha512 = GetString(packageUrl + ".sha512").Trim();
+        string actualSha512;
+        using (var sha = SHA512.Create())
+            actualSha512 = Convert.ToBase64String(sha.ComputeHash(packageBytes));
+        if (!string.Equals(expectedSha512, actualSha512, StringComparison.Ordinal))
+            throw new InvalidDataException($"Контрольная сумма пакета AssetsTools.NET {version} не совпала с NuGet.");
 
         try
         {
@@ -208,7 +231,7 @@ internal static class Program
             if (File.Exists(backupPath)) File.Delete(backupPath);
 
             state.InstalledDllHash = newHash;
-            Console.WriteLine($"AssetsTools.NET обновлена до версии {version}.");
+            Console.WriteLine($"AssetsTools.NET обновлена до версии {version} (пакет проверен по SHA-512).");
         }
         catch
         {
